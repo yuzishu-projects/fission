@@ -130,10 +130,23 @@ func (gp *GenericPool) genDeploymentSpec(env *fv1.Environment) (*appsv1.Deployme
 				ContainerPort: int32(8888),
 			},
 		},
+		VolumeMounts: []apiv1.VolumeMount{
+			{
+				Name:      "share-folder-volume",
+				MountPath: "/home/yuzishu/share_folder/",
+			},
+			{
+				Name:      "ipdos-manager-log-volume",
+				MountPath: "/dev/shm/ipdos_manager_log",
+			},
+		},
 	}, env.Spec.Runtime.Container)
 	if err != nil {
 		return nil, err
 	}
+
+	directoryOrCreate := apiv1.HostPathDirectoryOrCreate
+	fileOrCreate := apiv1.HostPathFileOrCreate
 
 	pod := apiv1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -147,6 +160,26 @@ func (gp *GenericPool) genDeploymentSpec(env *fv1.Environment) (*appsv1.Deployme
 			// sleep time of preStop to make sure that SIGTERM is sent
 			// to pod after 6 mins.
 			TerminationGracePeriodSeconds: &gracePeriodSeconds,
+			Volumes: []apiv1.Volume{
+				{
+					Name: "share-folder-volume",
+					VolumeSource: apiv1.VolumeSource{
+						HostPath: &apiv1.HostPathVolumeSource{
+							Path: "/home/yuzishu/share_folder/",
+							Type: &directoryOrCreate,
+						},
+					},
+				},
+				{
+					Name: "ipdos-manager-log-volume",
+					VolumeSource: apiv1.VolumeSource{
+						HostPath: &apiv1.HostPathVolumeSource{
+							Path: "/dev/shm/ipdos_manager_log",
+							Type: &fileOrCreate,
+						},
+					},
+				},
+			},
 		},
 	}
 
