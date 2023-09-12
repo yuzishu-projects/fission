@@ -132,12 +132,8 @@ func (gp *GenericPool) genDeploymentSpec(env *fv1.Environment) (*appsv1.Deployme
 		},
 		VolumeMounts: []apiv1.VolumeMount{
 			{
-				Name:      "share-folder-volume",
-				MountPath: "/home/yuzishu/share_folder/",
-			},
-			{
-				Name:      "ipdos-manager-log-volume",
-				MountPath: "/dev/shm/ipdos_manager_log",
+				Name:      "dev-shm-volume",
+				MountPath: "/dev/shm/lass_ict/",
 			},
 		},
 	}, env.Spec.Runtime.Container)
@@ -146,7 +142,6 @@ func (gp *GenericPool) genDeploymentSpec(env *fv1.Environment) (*appsv1.Deployme
 	}
 
 	directoryOrCreate := apiv1.HostPathDirectoryOrCreate
-	fileOrCreate := apiv1.HostPathFileOrCreate
 
 	pod := apiv1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -162,20 +157,11 @@ func (gp *GenericPool) genDeploymentSpec(env *fv1.Environment) (*appsv1.Deployme
 			TerminationGracePeriodSeconds: &gracePeriodSeconds,
 			Volumes: []apiv1.Volume{
 				{
-					Name: "share-folder-volume",
+					Name: "dev-shm-volume",
 					VolumeSource: apiv1.VolumeSource{
 						HostPath: &apiv1.HostPathVolumeSource{
-							Path: "/home/yuzishu/share_folder/",
+							Path: "/dev/shm/lass_ict/",
 							Type: &directoryOrCreate,
-						},
-					},
-				},
-				{
-					Name: "ipdos-manager-log-volume",
-					VolumeSource: apiv1.VolumeSource{
-						HostPath: &apiv1.HostPathVolumeSource{
-							Path: "/dev/shm/ipdos_manager_log",
-							Type: &fileOrCreate,
 						},
 					},
 				},
