@@ -132,8 +132,8 @@ func (gp *GenericPool) genDeploymentSpec(env *fv1.Environment) (*appsv1.Deployme
 		},
 		VolumeMounts: []apiv1.VolumeMount{
 			{
-				Name:      "dev-shm-volume",
-				MountPath: "/dev/shm/lass_ict/",
+				Name:      "share-folder-volume",
+				MountPath: "/home/yuzishu/share_folder/",
 			},
 		},
 	}, env.Spec.Runtime.Container)
@@ -157,10 +157,10 @@ func (gp *GenericPool) genDeploymentSpec(env *fv1.Environment) (*appsv1.Deployme
 			TerminationGracePeriodSeconds: &gracePeriodSeconds,
 			Volumes: []apiv1.Volume{
 				{
-					Name: "dev-shm-volume",
+					Name: "share-folder-volume",
 					VolumeSource: apiv1.VolumeSource{
 						HostPath: &apiv1.HostPathVolumeSource{
-							Path: "/dev/shm/lass_ict/",
+							Path: "/home/yuzishu/share_folder/",
 							Type: &directoryOrCreate,
 						},
 					},
