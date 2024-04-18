@@ -18,6 +18,7 @@ package poolmgr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -27,7 +28,6 @@ import (
 	"time"
 
 	"github.com/fission/fission/pkg/executor/metrics"
-	"github.com/hashicorp/go-multierror"
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 	apiv1 "k8s.io/api/core/v1"
@@ -53,6 +53,7 @@ import (
 	"github.com/fission/fission/pkg/generated/clientset/versioned"
 	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 	"github.com/fission/fission/pkg/utils"
+	"github.com/fission/fission/pkg/utils/manager"
 	otelUtils "github.com/fission/fission/pkg/utils/otel"
 )
 
@@ -71,13 +72,13 @@ type (
 	GenericPoolManager struct {
 		logger *zap.Logger
 
-		pools            map[string]*GenericPool
+		pools            map[k8sTypes.UID]*GenericPool
 		kubernetesClient kubernetes.Interface
 		metricsClient    metricsclient.Interface
 		nsResolver       *utils.NamespaceResolver
 
 		fissionClient  versioned.Interface
-		functionEnv    *cache.Cache
+		functionEnv    *cache.Cache[crd.CacheKeyUR, *fv1.Environment]
 		fsCache        *fscache.FunctionServiceCache
 		instanceID     string
 		requestChannel chan *request
@@ -134,17 +135,19 @@ func MakeGenericPoolManager(ctx context.Context,
 		enableIstio = istio
 	}
 
-	poolPodC := NewPoolPodController(ctx, gpmLogger, kubernetesClient,
+	poolPodC, err := NewPoolPodController(ctx, gpmLogger, kubernetesClient,
 		enableIstio, finformerFactory, gpmInformerFactory)
-
+	if err != nil {
+		return nil, err
+	}
 	gpm := &GenericPoolManager{
 		logger:                     gpmLogger,
-		pools:                      make(map[string]*GenericPool),
+		pools:                      make(map[k8sTypes.UID]*GenericPool),
 		kubernetesClient:           kubernetesClient,
 		nsResolver:                 utils.DefaultNSResolver(),
 		metricsClient:              metricsClient,
 		fissionClient:              fissionClient,
-		functionEnv:                cache.MakeCache(10*time.Second, 0),
+		functionEnv:                cache.MakeCache[crd.CacheKeyUR, *fv1.Environment](10*time.Second, 0),
 		fsCache:                    fscache.MakeFunctionServiceCache(gpmLogger),
 		instanceID:                 instanceID,
 		requestChannel:             make(chan *request),
@@ -167,7 +170,7 @@ func MakeGenericPoolManager(ctx context.Context,
 	return gpm, nil
 }
 
-func (gpm *GenericPoolManager) Run(ctx context.Context) {
+func (gpm *GenericPoolManager) Run(ctx context.Context, mgr manager.Interface) {
 	waitSynced := make([]k8sCache.InformerSynced, 0)
 	for _, podListerSynced := range gpm.podListerSynced {
 		waitSynced = append(waitSynced, podListerSynced)
@@ -177,10 +180,25 @@ func (gpm *GenericPoolManager) Run(ctx context.Context) {
 	}
 	go gpm.service()
 	gpm.poolPodC.InjectGpm(gpm)
-	go gpm.WebsocketStartEventChecker(ctx, gpm.kubernetesClient)
-	go gpm.NoActiveConnectionEventChecker(ctx, gpm.kubernetesClient)
-	go gpm.idleObjectReaper(ctx)
-	go gpm.poolPodC.Run(ctx, ctx.Done())
+
+	mgr.Add(ctx, func(ctx context.Context) {
+		err := gpm.WebsocketStartEventChecker(ctx, gpm.kubernetesClient)
+		if err != nil {
+			gpm.logger.Error("error in checking websocket start event from pod: ", zap.Error(err))
+		}
+	})
+	mgr.Add(ctx, func(ctx context.Context) {
+		err := gpm.NoActiveConnectionEventChecker(ctx, gpm.kubernetesClient) //nolint:errcheck
+		if err != nil {
+			gpm.logger.Error("error in checking inactive event from pod: ", zap.Error(err))
+		}
+	})
+	mgr.Add(ctx, func(ctx context.Context) {
+		gpm.idleObjectReaper(ctx)
+	})
+	mgr.Add(ctx, func(ctx context.Context) {
+		gpm.poolPodC.Run(ctx, ctx.Done(), mgr)
+	})
 }
 
 func (gpm *GenericPoolManager) GetTypeName(ctx context.Context) fv1.ExecutorType {
@@ -205,13 +223,13 @@ func (gpm *GenericPoolManager) GetFuncSvc(ctx context.Context, fn *fv1.Function)
 	env, err := gpm.getFunctionEnv(ctx, fn)
 	if err != nil {
 		fErr = err
-		return
+		return nil, fErr
 	}
 
 	pool, created, err := gpm.getPool(ctx, env)
 	if err != nil {
 		fErr = err
-		return
+		return nil, fErr
 	}
 
 	if created {
@@ -235,9 +253,10 @@ func (gpm *GenericPoolManager) DeleteFuncSvcFromCache(ctx context.Context, fsvc 
 	gpm.fsCache.DeleteFunctionSvc(ctx, fsvc)
 }
 
-func (gpm *GenericPoolManager) UnTapService(ctx context.Context, key string, svcHost string) {
+func (gpm *GenericPoolManager) UnTapService(ctx context.Context, fnMeta *metav1.ObjectMeta, svcHost string) {
+	key := crd.CacheKeyURGFromMeta(fnMeta)
 	otelUtils.SpanTrackEvent(ctx, "UnTapService",
-		attribute.KeyValue{Key: "key", Value: attribute.StringValue(key)},
+		attribute.KeyValue{Key: "key", Value: attribute.StringValue(key.String())},
 		attribute.KeyValue{Key: "svcHost", Value: attribute.StringValue(svcHost)})
 	gpm.fsCache.MarkAvailable(key, svcHost)
 }
@@ -252,9 +271,10 @@ func (gpm *GenericPoolManager) TapService(ctx context.Context, svcHost string) e
 	return nil
 }
 
-func (gpm *GenericPoolManager) MarkSpecializationFailure(ctx context.Context, key string) {
+func (gpm *GenericPoolManager) MarkSpecializationFailure(ctx context.Context, fnMeta *metav1.ObjectMeta) {
+	key := crd.CacheKeyURGFromMeta(fnMeta)
 	otelUtils.SpanTrackEvent(ctx, "MarkSpecializationFailure",
-		attribute.KeyValue{Key: "key", Value: attribute.StringValue(key)})
+		attribute.KeyValue{Key: "key", Value: attribute.StringValue(key.String())})
 	logger := otelUtils.LoggerWithTraceID(ctx, gpm.logger)
 	logger.Info("marking specialization failure", zap.Any("key", key))
 	gpm.fsCache.MarkSpecializationFailure(key)
@@ -362,7 +382,7 @@ func (gpm *GenericPoolManager) AdoptExistingResources(ctx context.Context) {
 			}
 
 			// create environment map for later use
-			key := fmt.Sprintf("%v/%v", env.ObjectMeta.Namespace, env.ObjectMeta.Name)
+			key := fmt.Sprintf("%s/%s", env.ObjectMeta.Namespace, env.ObjectMeta.Name)
 			envMap[key] = env
 		}
 	}
@@ -394,7 +414,7 @@ func (gpm *GenericPoolManager) AdoptExistingResources(ctx context.Context) {
 				// avoid too many requests arrive Kubernetes API server at the same time.
 				time.Sleep(time.Duration(rand.Intn(30)) * time.Millisecond)
 
-				patch := fmt.Sprintf(`{"metadata":{"annotations":{"%v":"%v"}}}`, fv1.EXECUTOR_INSTANCEID_LABEL, gpm.instanceID)
+				patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, fv1.EXECUTOR_INSTANCEID_LABEL, gpm.instanceID)
 				pod, err = gpm.kubernetesClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, k8sTypes.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 				if err != nil {
 					// just log the error since it won't affect the function serving
@@ -415,7 +435,7 @@ func (gpm *GenericPoolManager) AdoptExistingResources(ctx context.Context) {
 				envName, ok5 := pod.Labels[fv1.ENVIRONMENT_NAME]
 				envNS, ok6 := pod.Labels[fv1.ENVIRONMENT_NAMESPACE]
 				svcHost, ok7 := pod.Annotations[fv1.ANNOTATION_SVC_HOST]
-				env, ok8 := envMap[fmt.Sprintf("%v/%v", envNS, envName)]
+				env, ok8 := envMap[fmt.Sprintf("%s/%s", envNS, envName)]
 
 				if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8) {
 					gpm.logger.Warn("failed to adopt pod for function due to lack of necessary information",
@@ -472,22 +492,22 @@ func (gpm *GenericPoolManager) AdoptExistingResources(ctx context.Context) {
 func (gpm *GenericPoolManager) CleanupOldExecutorObjects(ctx context.Context) {
 	gpm.logger.Info("Poolmanager starts to clean orphaned resources", zap.String("instanceID", gpm.instanceID))
 
-	errs := &multierror.Error{}
+	var errs error
 	listOpts := metav1.ListOptions{
 		LabelSelector: labels.Set(map[string]string{fv1.EXECUTOR_TYPE: string(fv1.ExecutorTypePoolmgr)}).AsSelector().String(),
 	}
 
 	err := reaper.CleanupDeployments(ctx, gpm.logger, gpm.kubernetesClient, gpm.instanceID, listOpts)
 	if err != nil {
-		errs = multierror.Append(errs, err)
+		errs = errors.Join(errs, err)
 	}
 
 	err = reaper.CleanupPods(ctx, gpm.logger, gpm.kubernetesClient, gpm.instanceID, listOpts)
 	if err != nil {
-		errs = multierror.Append(errs, err)
+		errs = errors.Join(errs, err)
 	}
 
-	if errs.ErrorOrNil() != nil {
+	if errs != nil {
 		// TODO retry reaper; logged and ignored for now
 		gpm.logger.Error("Failed to cleanup old executor objects", zap.Error(err))
 	}
@@ -501,7 +521,7 @@ func (gpm *GenericPoolManager) service() {
 			// just because they are missing in the cache, we end up creating another duplicate pool.
 			var err error
 			created := false
-			pool, ok := gpm.pools[crd.CacheKeyUID(&req.env.ObjectMeta)]
+			pool, ok := gpm.pools[crd.CacheKeyUIDFromMeta(&req.env.ObjectMeta)]
 			if !ok {
 				// To support backward compatibility, if envs are created in default ns, we go ahead
 				// and create pools in fission-function ns as earlier.
@@ -514,7 +534,7 @@ func (gpm *GenericPoolManager) service() {
 					req.responseChannel <- &response{error: err}
 					continue
 				}
-				gpm.pools[crd.CacheKeyUID(&req.env.ObjectMeta)] = pool
+				gpm.pools[crd.CacheKeyUIDFromMeta(&req.env.ObjectMeta)] = pool
 				created = true
 			}
 			req.responseChannel <- &response{pool: pool, created: created}
@@ -524,19 +544,21 @@ func (gpm *GenericPoolManager) service() {
 				zap.String("environment", env.ObjectMeta.Name),
 				zap.String("namespace", env.ObjectMeta.Namespace))
 
-			key := crd.CacheKeyUID(&req.env.ObjectMeta)
+			key := crd.CacheKeyUIDFromMeta(&req.env.ObjectMeta)
 			pool, ok := gpm.pools[key]
 			if !ok {
 				gpm.logger.Error("Could not find pool", zap.String("environment", env.ObjectMeta.Name), zap.String("namespace", env.ObjectMeta.Namespace))
 				return
 			}
 			delete(gpm.pools, key)
-			err := pool.destroy(req.ctx)
-			if err != nil {
-				gpm.logger.Error("failed to destroy pool",
-					zap.String("environment", env.ObjectMeta.Name),
-					zap.String("namespace", env.ObjectMeta.Namespace),
-					zap.Error(err))
+			if pool != nil {
+				err := pool.destroy(req.ctx)
+				if err != nil {
+					gpm.logger.Error("failed to destroy pool",
+						zap.String("environment", env.ObjectMeta.Name),
+						zap.String("namespace", env.ObjectMeta.Namespace),
+						zap.Error(err))
+				}
 			}
 			// no response, caller doesn't wait
 		}
@@ -571,10 +593,9 @@ func (gpm *GenericPoolManager) getFunctionEnv(ctx context.Context, fn *fv1.Funct
 
 	// Cached ?
 	// TODO: the cache should be able to search by <env name, fn namespace> instead of function metadata.
-	result, err := gpm.functionEnv.Get(crd.CacheKey(&fn.ObjectMeta))
+	result, err := gpm.functionEnv.Get(crd.CacheKeyURFromMeta(&fn.ObjectMeta))
 	if err == nil {
-		env = result.(*fv1.Environment)
-		return env, nil
+		return result, nil
 	}
 
 	// Get env from controller
@@ -589,7 +610,7 @@ func (gpm *GenericPoolManager) getFunctionEnv(ctx context.Context, fn *fv1.Funct
 
 	// cache for future lookups
 	m := fn.ObjectMeta
-	_, err = gpm.functionEnv.Set(crd.CacheKey(&m), env)
+	_, err = gpm.functionEnv.Set(crd.CacheKeyURFromMeta(&m), env)
 	if err != nil {
 		gpm.logger.Error(
 			"failed to set the key",
@@ -695,13 +716,10 @@ func (gpm *GenericPoolManager) doIdleObjectReaper(ctx context.Context) {
 }
 
 // WebsocketStartEventChecker checks if the pod has emitted a websocket connection start event
-func (gpm *GenericPoolManager) WebsocketStartEventChecker(ctx context.Context, kubeClient kubernetes.Interface) {
-	stopper := make(chan struct{})
-	defer close(stopper)
-
+func (gpm *GenericPoolManager) WebsocketStartEventChecker(ctx context.Context, kubeClient kubernetes.Interface) error {
 	var wg wait.Group
 	for _, informer := range utils.GetInformerEventChecker(ctx, kubeClient, "WsConnectionStarted") {
-		informer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		_, err := informer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				mObj := obj.(metav1.Object)
 				gpm.logger.Info("Websocket event detected for pod",
@@ -718,19 +736,20 @@ func (gpm *GenericPoolManager) WebsocketStartEventChecker(ctx context.Context, k
 				}
 			},
 		})
-		wg.StartWithChannel(stopper, informer.Run)
+		if err != nil {
+			return err
+		}
+		wg.StartWithChannel(ctx.Done(), informer.Run)
 	}
 	wg.Wait()
+	return nil
 }
 
 // NoActiveConnectionEventChecker checks if the pod has emitted an inactive event
-func (gpm *GenericPoolManager) NoActiveConnectionEventChecker(ctx context.Context, kubeClient kubernetes.Interface) {
-	stopper := make(chan struct{})
-	defer close(stopper)
-
+func (gpm *GenericPoolManager) NoActiveConnectionEventChecker(ctx context.Context, kubeClient kubernetes.Interface) error {
 	var wg wait.Group
 	for _, informer := range utils.GetInformerEventChecker(ctx, kubeClient, "NoActiveConnections") {
-		informer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		_, err := informer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				mObj := obj.(metav1.Object)
 				gpm.logger.Info("Inactive event detected for pod",
@@ -758,9 +777,13 @@ func (gpm *GenericPoolManager) NoActiveConnectionEventChecker(ctx context.Contex
 
 			},
 		})
-		wg.StartWithChannel(stopper, informer.Run)
+		if err != nil {
+			return err
+		}
+		wg.StartWithChannel(ctx.Done(), informer.Run)
 	}
 	wg.Wait()
+	return nil
 }
 
 func (gpm *GenericPoolManager) DumpDebugInfo(ctx context.Context) error {

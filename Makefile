@@ -23,6 +23,7 @@ COMMITSHA ?= $(shell git rev-parse HEAD)
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 GOAMD64 ?= $(shell go env GOAMD64)
+GOPATH ?= $(shell go env GOPATH)
 
 FISSION-CLI-SUFFIX :=
 ifeq ($(GOOS), windows)
@@ -51,7 +52,7 @@ test-run: code-checks
 
 ### Binaries
 build-fission-cli:
-	@GOOS=$(GOOS) GOARCH=$(GOARCH) GOAMD64=$(GOAMD64) GORELEASER_CURRENT_TAG=$(VERSION) goreleaser build --snapshot --rm-dist --single-target --id fission-cli
+	@GOOS=$(GOOS) GOARCH=$(GOARCH) GOAMD64=$(GOAMD64) GORELEASER_CURRENT_TAG=$(VERSION) goreleaser build --snapshot --clean --single-target --id fission-cli
 
 install-fission-cli:
 	# TODO: Fix this hack, replace v1 with GOAMD64
@@ -59,21 +60,21 @@ install-fission-cli:
 
 ### Codegen
 codegen: controller-gen-install
-	@controller-gen object:headerFile="hack/boilerplate.txt" paths="./..."
+	$(GOPATH)/bin/controller-gen object:headerFile="hack/boilerplate.txt" paths="./..."
 	@./hack/update-codegen.sh
 
 ### CRDs
 controller-gen-install:
-	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.10.0
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0
 
 generate-crds: controller-gen-install
-	controller-gen crd \
+	$(GOPATH)/bin/controller-gen crd \
 	paths=./pkg/apis/core/v1  \
 	output:crd:artifacts:config=crds/v1
 
 ### Webhook generation: it generates webhook configs with help of kubebuilder:webhook tag
 generate-webhooks: controller-gen-install
-	controller-gen webhook \
+	$(GOPATH)/bin/controller-gen webhook \
 	 paths=./pkg/apis/core/v1 \
 	 output:dir=charts/fission-all/templates/webhook-server
 
@@ -99,11 +100,11 @@ generate-cli-docs:
 	go run tools/cmd-docs/main.go -o "../fission.io/content/en/docs/reference/fission-cli"
 
 install-crd-ref-docs:
-	go install github.com/elastic/crd-ref-docs@v0.0.8
+	go install github.com/elastic/crd-ref-docs@v0.0.10
 
 generate-crd-ref-docs: install-crd-ref-docs
 	# crd-ref-docs: https://github.com/elastic/crd-ref-docs
-	crd-ref-docs --source-path=pkg/apis/core/v1 --config=tools/crd-ref-docs/config.yaml --renderer markdown
+	$(GOPATH)/bin/crd-ref-docs --source-path=pkg/apis/core/v1 --config=tools/crd-ref-docs/config.yaml --renderer markdown
 	cp tools/crd-ref-docs/header.md crd_docs.md
 	cat out.md >> crd_docs.md && rm out.md
 	mv crd_docs.md ../fission.io/content/en/docs/reference/crd-reference.md
@@ -111,7 +112,7 @@ generate-crd-ref-docs: install-crd-ref-docs
 all-generators: codegen generate-crds generate-swagger-doc generate-cli-docs generate-crd-ref-docs
 
 skaffold-prebuild:
-	@GOOS=linux GOARCH=amd64 GORELEASER_CURRENT_TAG=$(VERSION) goreleaser build --snapshot --rm-dist --single-target
+	@GOOS=linux GOARCH=amd64 GORELEASER_CURRENT_TAG=$(VERSION) goreleaser build --snapshot --clean --single-target
 	@cp -v cmd/builder/Dockerfile dist/builder_linux_amd64_v1/Dockerfile
 	@cp -v cmd/fetcher/Dockerfile dist/fetcher_linux_amd64_v1/Dockerfile
 	@cp -v cmd/fission-bundle/Dockerfile dist/fission-bundle_linux_amd64_v1/Dockerfile
@@ -127,3 +128,10 @@ release:
 	@./hack/release.sh $(VERSION)
 	@./hack/release-tag.sh $(VERSION)
 	@./hack/changelog.sh
+
+## Envtest
+install-envtest:
+	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+setup-envtest:
+	setup-envtest -p path use 1.23.x

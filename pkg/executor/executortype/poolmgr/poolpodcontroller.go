@@ -36,10 +36,12 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
+	"github.com/fission/fission/pkg/crd"
 	"github.com/fission/fission/pkg/executor/fscache"
 	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 	flisterv1 "github.com/fission/fission/pkg/generated/listers/core/v1"
 	"github.com/fission/fission/pkg/utils"
+	"github.com/fission/fission/pkg/utils/manager"
 )
 
 type (
@@ -71,7 +73,7 @@ func NewPoolPodController(ctx context.Context, logger *zap.Logger,
 	kubernetesClient kubernetes.Interface,
 	enableIstio bool,
 	finformerFactory map[string]genInformer.SharedInformerFactory,
-	gpmInformerFactory map[string]k8sInformers.SharedInformerFactory) *PoolPodController {
+	gpmInformerFactory map[string]k8sInformers.SharedInformerFactory) (*PoolPodController, error) {
 	logger = logger.Named("pool_pod_controller")
 	p := &PoolPodController{
 		logger:               logger,
@@ -88,30 +90,47 @@ func NewPoolPodController(ctx context.Context, logger *zap.Logger,
 	}
 	if p.enableIstio {
 		for _, factory := range finformerFactory {
-			factory.Core().V1().Functions().Informer().AddEventHandler(FunctionEventHandlers(ctx, p.logger, p.kubernetesClient, p.nsResolver.ResolveNamespace(p.nsResolver.FunctionNamespace), p.enableIstio))
+			_, err := factory.Core().V1().Functions().Informer().AddEventHandler(FunctionEventHandlers(ctx, p.logger, p.kubernetesClient, p.nsResolver.ResolveNamespace(p.nsResolver.FunctionNamespace), p.enableIstio))
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, factory := range finformerFactory {
+		_, err := factory.Core().V1().Functions().Informer().AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+			DeleteFunc: p.handleFuncDelete,
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
 	for ns, informer := range finformerFactory {
-		informer.Core().V1().Environments().Informer().AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		_, err := informer.Core().V1().Environments().Informer().AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
 			AddFunc:    p.enqueueEnvAdd,
 			UpdateFunc: p.enqueueEnvUpdate,
 			DeleteFunc: p.enqueueEnvDelete,
 		})
+		if err != nil {
+			return nil, err
+		}
 		p.envLister[ns] = informer.Core().V1().Environments().Lister()
 		p.envListerSynced[ns] = informer.Core().V1().Environments().Informer().HasSynced
 	}
 	for ns, informerFactory := range gpmInformerFactory {
-		informerFactory.Apps().V1().ReplicaSets().Informer().AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		_, err := informerFactory.Apps().V1().ReplicaSets().Informer().AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
 			AddFunc:    p.handleRSAdd,
 			UpdateFunc: p.handleRSUpdate,
 			DeleteFunc: p.handleRSDelete,
 		})
+		if err != nil {
+			return nil, err
+		}
 		p.podListerSynced[ns] = informerFactory.Core().V1().Pods().Informer().HasSynced
 		p.podLister[ns] = informerFactory.Core().V1().Pods().Lister()
 	}
 
 	p.logger.Info("pool pod controller handlers registered")
-	return p
+	return p, nil
 }
 
 func (p *PoolPodController) InjectGpm(gpm *GenericPoolManager) {
@@ -122,6 +141,11 @@ func IsPodActive(p *v1.Pod) bool {
 	return v1.PodSucceeded != p.Status.Phase &&
 		v1.PodFailed != p.Status.Phase &&
 		p.DeletionTimestamp == nil
+}
+
+func (p *PoolPodController) handleFuncDelete(obj interface{}) {
+	fn := obj.(*fv1.Function)
+	p.gpm.fsCache.MarkFuncDeleted(crd.CacheKeyURGFromMeta(&fn.ObjectMeta))
 }
 
 func (p *PoolPodController) processRS(rs *apps.ReplicaSet) {
@@ -223,7 +247,7 @@ func (p *PoolPodController) enqueueEnvDelete(obj interface{}) {
 	p.envDeleteQueue.Add(env)
 }
 
-func (p *PoolPodController) Run(ctx context.Context, stopCh <-chan struct{}) {
+func (p *PoolPodController) Run(ctx context.Context, stopCh <-chan struct{}, mgr manager.Interface) {
 	defer utilruntime.HandleCrash()
 	defer p.envCreateUpdateQueue.ShutDown()
 	defer p.envDeleteQueue.ShutDown()
@@ -242,10 +266,16 @@ func (p *PoolPodController) Run(ctx context.Context, stopCh <-chan struct{}) {
 		p.logger.Fatal("failed to wait for caches to sync")
 	}
 	for i := 0; i < 4; i++ {
-		go wait.Until(p.workerRun(ctx, "envCreateUpdate", p.envCreateUpdateQueueProcessFunc), time.Second, stopCh)
+		mgr.Add(ctx, func(ctx context.Context) {
+			wait.Until(p.workerRun(ctx, "envCreateUpdate", p.envCreateUpdateQueueProcessFunc), time.Second, stopCh)
+		})
 	}
-	go wait.Until(p.workerRun(ctx, "envDeleteQueue", p.envDeleteQueueProcessFunc), time.Second, stopCh)
-	go wait.Until(p.workerRun(ctx, "spCleanupPodQueue", p.spCleanupPodQueueProcessFunc), time.Second, stopCh)
+	mgr.Add(ctx, func(ctx context.Context) {
+		wait.Until(p.workerRun(ctx, "envDeleteQueue", p.envDeleteQueueProcessFunc), time.Second, stopCh)
+	})
+	mgr.Add(ctx, func(ctx context.Context) {
+		wait.Until(p.workerRun(ctx, "spCleanupPodQueue", p.spCleanupPodQueueProcessFunc), time.Second, stopCh)
+	})
 	p.logger.Info("Started workers for poolPodController")
 	<-stopCh
 	p.logger.Info("Shutting down workers for poolPodController")
@@ -375,7 +405,13 @@ func (p *PoolPodController) envDeleteQueueProcessFunc(ctx context.Context) bool 
 	p.gpm.cleanupPool(ctx, env)
 	specializePodLables := getSpecializedPodLabels(env)
 	ns := p.nsResolver.ResolveNamespace(p.nsResolver.FunctionNamespace)
-	specializedPods, err := p.podLister[ns].Pods(ns).List(labels.SelectorFromSet(specializePodLables))
+	podLister, ok := p.podLister[ns]
+	if !ok {
+		p.logger.Error("no pod lister found for namespace", zap.String("namespace", ns))
+		p.envDeleteQueue.Forget(obj)
+		return false
+	}
+	specializedPods, err := podLister.Pods(ns).List(labels.SelectorFromSet(specializePodLables))
 	if err != nil {
 		p.logger.Error("failed to list specialized pods", zap.Error(err))
 		p.envDeleteQueue.Forget(obj)

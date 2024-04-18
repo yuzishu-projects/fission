@@ -18,6 +18,7 @@ package buildermgr
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/pkg/errors"
@@ -28,13 +29,13 @@ import (
 	"github.com/fission/fission/pkg/executor/util"
 	fetcherConfig "github.com/fission/fission/pkg/fetcher/config"
 	"github.com/fission/fission/pkg/utils"
+	"github.com/fission/fission/pkg/utils/manager"
 )
 
 // Start the buildermgr service.
-func Start(ctx context.Context, logger *zap.Logger, storageSvcUrl string) error {
+func Start(ctx context.Context, clientGen crd.ClientGeneratorInterface, logger *zap.Logger, mgr manager.Interface, storageSvcUrl string) error {
 	bmLogger := logger.Named("builder_manager")
 
-	clientGen := crd.NewClientGenerator()
 	fissionClient, err := clientGen.GetFissionClient()
 	if err != nil {
 		return errors.Wrap(err, "failed to get fission client")
@@ -44,7 +45,7 @@ func Start(ctx context.Context, logger *zap.Logger, storageSvcUrl string) error 
 		return errors.Wrap(err, "failed to get kubernetes client")
 	}
 
-	err = crd.WaitForCRDs(ctx, logger, fissionClient)
+	err = crd.WaitForFunctionCRDs(ctx, logger, fissionClient)
 	if err != nil {
 		return errors.Wrap(err, "error waiting for CRDs")
 	}
@@ -55,17 +56,23 @@ func Start(ctx context.Context, logger *zap.Logger, storageSvcUrl string) error 
 	}
 
 	podSpecPatch, err := util.GetSpecFromConfigMap(fv1.BuilderPodSpecPath)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		logger.Warn("error reading data for pod spec patch", zap.String("path", fv1.BuilderPodSpecPath), zap.Error(err))
 	}
 
-	envWatcher := makeEnvironmentWatcher(ctx, bmLogger, fissionClient, kubernetesClient, fetcherConfig, podSpecPatch)
-	envWatcher.Run(ctx)
+	envWatcher, err := makeEnvironmentWatcher(ctx, bmLogger, fissionClient, kubernetesClient, fetcherConfig, podSpecPatch)
+	if err != nil {
+		return err
+	}
+	envWatcher.Run(ctx, mgr)
 
 	pkgWatcher := makePackageWatcher(bmLogger, fissionClient,
 		kubernetesClient, storageSvcUrl,
 		utils.GetK8sInformersForNamespaces(kubernetesClient, time.Minute*30, fv1.Pods),
 		utils.GetInformersForNamespaces(fissionClient, time.Minute*30, fv1.PackagesResource))
-	pkgWatcher.Run(ctx)
+	err = pkgWatcher.Run(ctx, mgr)
+	if err != nil {
+		return err
+	}
 	return nil
 }

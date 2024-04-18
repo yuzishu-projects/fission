@@ -24,23 +24,25 @@ import (
 
 	"github.com/fission/fission/pkg/crd"
 	"github.com/fission/fission/pkg/publisher"
+	"github.com/fission/fission/pkg/utils/manager"
 )
 
-func Start(ctx context.Context, logger *zap.Logger, routerUrl string) error {
-	clientGen := crd.NewClientGenerator()
+func Start(ctx context.Context, clientGen crd.ClientGeneratorInterface, logger *zap.Logger, mgr manager.Interface, routerUrl string) error {
 	fissionClient, err := clientGen.GetFissionClient()
 	if err != nil {
 		return errors.Wrap(err, "failed to get fission client")
 	}
 
-	err = crd.WaitForCRDs(ctx, logger, fissionClient)
+	err = crd.WaitForFunctionCRDs(ctx, logger, fissionClient)
 	if err != nil {
 		return errors.Wrap(err, "error waiting for CRDs")
 	}
 
 	poster := publisher.MakeWebhookPublisher(logger, routerUrl)
-	timerSync := MakeTimerSync(ctx, logger, fissionClient, MakeTimer(logger, poster))
-	timerSync.Run(ctx)
-
+	timerSync, err := MakeTimerSync(ctx, logger, fissionClient, MakeTimer(logger, poster))
+	if err != nil {
+		return errors.Wrap(err, "error making timer sync")
+	}
+	timerSync.Run(ctx, mgr)
 	return nil
 }

@@ -1,11 +1,9 @@
 ignore:
   - "charts"
-  - "demos"
-  - "Documentation"
-  - "examples"
-  - "test"
+  - "test/"
   - "tools"
-  - "pkg/apis/genclient"
+  - "pkg/generated" # generated code
+  - "pkg/apis/*/*/zz_generated*" # generated code
 coverage:
   status:
     project:

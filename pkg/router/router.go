@@ -22,7 +22,7 @@ Its job is to:
 
   1. Keep track of HTTP triggers and their mappings to functions
 
-     Use the controller API to get and watch this state.
+     Use the Kubernetes API to get and watch this state.
 
   2. Given a function, get a reference to a routable function run service
 
@@ -47,13 +47,15 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel"
 	"go.uber.org/zap"
 
 	"github.com/fission/fission/pkg/crd"
-	executorClient "github.com/fission/fission/pkg/executor/client"
+	eclient "github.com/fission/fission/pkg/executor/client"
 	"github.com/fission/fission/pkg/throttler"
 	"github.com/fission/fission/pkg/utils/httpserver"
+	"github.com/fission/fission/pkg/utils/manager"
 	"github.com/fission/fission/pkg/utils/metrics"
 	otelUtils "github.com/fission/fission/pkg/utils/otel"
 )
@@ -62,98 +64,94 @@ import (
 
 // request url ---[trigger]---> Function(name, deployment) ----[deployment]----> Function(name, uid) ----[pool mgr]---> k8s service url
 
-func router(ctx context.Context, logger *zap.Logger, httpTriggerSet *HTTPTriggerSet) *mutableRouter {
+func router(ctx context.Context, logger *zap.Logger, mgr manager.Interface, httpTriggerSet *HTTPTriggerSet) (*mutableRouter, error) {
 	var mr *mutableRouter
 	mux := mux.NewRouter()
 	mux.Use(metrics.HTTPMetricMiddleware)
 
 	// see issue https://github.com/fission/fission/issues/1317
-	useEncodedPath, _ := strconv.ParseBool(os.Getenv("USE_ENCODED_PATH"))
+	useEncodedPath, err := strconv.ParseBool(os.Getenv("USE_ENCODED_PATH"))
+	if err != nil {
+		return nil, err
+	}
 	if useEncodedPath {
 		mr = newMutableRouter(logger, mux.UseEncodedPath())
 	} else {
 		mr = newMutableRouter(logger, mux)
 	}
 
-	httpTriggerSet.subscribeRouter(ctx, mr)
-	return mr
+	err = httpTriggerSet.subscribeRouter(ctx, mgr, mr)
+	if err != nil {
+		return nil, err
+	}
+	return mr, nil
 }
 
-func serve(ctx context.Context, logger *zap.Logger, port int,
-	httpTriggerSet *HTTPTriggerSet, displayAccessLog bool) {
-	mr := router(ctx, logger, httpTriggerSet)
+func serve(ctx context.Context, logger *zap.Logger, mgr manager.Interface, port int,
+	httpTriggerSet *HTTPTriggerSet, displayAccessLog bool) error {
+	mr, err := router(ctx, logger, mgr, httpTriggerSet)
+	if err != nil {
+		return errors.Wrap(err, "error making router")
+	}
 	handler := otelUtils.GetHandlerWithOTEL(mr, "fission-router", otelUtils.UrlsToIgnore("/router-healthz"))
-	httpserver.StartServer(ctx, logger, "router", fmt.Sprintf("%d", port), handler)
+	mgr.Add(ctx, func(ctx context.Context) {
+		httpserver.StartServer(ctx, logger, mgr, "router", fmt.Sprintf("%d", port), handler)
+	})
+	return nil
 }
 
 // Start starts a router
-func Start(ctx context.Context, logger *zap.Logger, port int, executorURL string) {
+func Start(ctx context.Context, clientGen crd.ClientGeneratorInterface, logger *zap.Logger, mgr manager.Interface, port int, executor eclient.ClientInterface) error {
 	fmap := makeFunctionServiceMap(logger, time.Minute)
 
-	clientGen := crd.NewClientGenerator()
 	fissionClient, err := clientGen.GetFissionClient()
 	if err != nil {
-		logger.Fatal("error making the fission client", zap.Error(err))
+		return errors.Wrap(err, "error making the fission client")
 	}
 	kubeClient, err := clientGen.GetKubernetesClient()
 	if err != nil {
-		logger.Fatal("error making the kube client", zap.Error(err))
+		return errors.Wrap(err, "error making the kube client")
 	}
 
-	err = crd.WaitForCRDs(ctx, logger, fissionClient)
+	err = crd.WaitForFunctionCRDs(ctx, logger, fissionClient)
 	if err != nil {
-		logger.Fatal("error waiting for CRDs", zap.Error(err))
+		return errors.Wrap(err, "error waiting for CRDs")
 	}
-
-	executor := executorClient.MakeClient(logger, executorURL)
 
 	timeoutStr := os.Getenv("ROUTER_ROUND_TRIP_TIMEOUT")
 	timeout, err := time.ParseDuration(timeoutStr)
 	if err != nil {
-		logger.Fatal("failed to parse timeout duration from 'ROUTER_ROUND_TRIP_TIMEOUT'",
-			zap.Error(err),
-			zap.String("value", timeoutStr))
+		return errors.Wrap(err, fmt.Sprintf("failed to parse timeout duration value('%s') from 'ROUTER_ROUND_TRIP_TIMEOUT'", timeoutStr))
 	}
 
 	timeoutExponentStr := os.Getenv("ROUTER_ROUNDTRIP_TIMEOUT_EXPONENT")
 	timeoutExponent, err := strconv.Atoi(timeoutExponentStr)
 	if err != nil {
-		logger.Fatal("failed to parse timeout exponent from 'ROUTER_ROUNDTRIP_TIMEOUT_EXPONENT'",
-			zap.Error(err),
-			zap.String("value", timeoutExponentStr))
+		return errors.Wrap(err, fmt.Sprintf("failed to parse timeout exponent value('%s') from 'ROUTER_ROUNDTRIP_TIMEOUT_EXPONENT'", timeoutExponentStr))
 	}
 
 	keepAliveTimeStr := os.Getenv("ROUTER_ROUND_TRIP_KEEP_ALIVE_TIME")
 	keepAliveTime, err := time.ParseDuration(keepAliveTimeStr)
 	if err != nil {
-		logger.Fatal("failed to parse keep alive duration from 'ROUTER_ROUND_TRIP_KEEP_ALIVE_TIME'",
-			zap.Error(err),
-			zap.String("value", keepAliveTimeStr))
+		return errors.Wrap(err, fmt.Sprintf("failed to parse keep alive duration value('%s') from 'ROUTER_ROUND_TRIP_KEEP_ALIVE_TIME'", keepAliveTimeStr))
 	}
 
 	disableKeepAliveStr := os.Getenv("ROUTER_ROUND_TRIP_DISABLE_KEEP_ALIVE")
 	disableKeepAlive, err := strconv.ParseBool(disableKeepAliveStr)
 	if err != nil {
-		disableKeepAlive = true
-		logger.Fatal("failed to parse enable keep alive from 'ROUTER_ROUND_TRIP_DISABLE_KEEP_ALIVE'",
-			zap.Error(err),
-			zap.String("value", disableKeepAliveStr))
+		return errors.Wrap(err, fmt.Sprintf("failed to parse enable keep alive value('%s') from 'ROUTER_ROUND_TRIP_DISABLE_KEEP_ALIVE'", disableKeepAliveStr))
 	}
 
 	maxRetriesStr := os.Getenv("ROUTER_ROUND_TRIP_MAX_RETRIES")
 	maxRetries, err := strconv.Atoi(maxRetriesStr)
 	if err != nil {
-		logger.Fatal("failed to parse max retries from 'ROUTER_ROUND_TRIP_MAX_RETRIES'",
-			zap.Error(err),
-			zap.String("value", maxRetriesStr))
+		return errors.Wrap(err, fmt.Sprintf("failed to parse max retries value('%s') from 'ROUTER_ROUND_TRIP_MAX_RETRIES'", maxRetriesStr))
 	}
 
 	isDebugEnvStr := os.Getenv("DEBUG_ENV")
 	isDebugEnv, err := strconv.ParseBool(isDebugEnvStr)
 	if err != nil {
-		logger.Fatal("failed to parse debug env from 'DEBUG_ENV'",
-			zap.Error(err),
-			zap.String("value", isDebugEnvStr))
+		return errors.Wrap(err, fmt.Sprintf("failed to parse debug env value('%s') from 'DEBUG_ENV'", isDebugEnvStr))
 	}
 
 	// svcAddrRetryCount is the max times for RetryingRoundTripper to retry with a specific service address
@@ -200,7 +198,7 @@ func Start(ctx context.Context, logger *zap.Logger, port int, executorURL string
 			zap.Bool("default", displayAccessLog))
 	}
 
-	triggers := makeHTTPTriggerSet(logger.Named("triggerset"), fmap, fissionClient, kubeClient, executor, &tsRoundTripperParams{
+	triggers, err := makeHTTPTriggerSet(logger.Named("triggerset"), fmap, fissionClient, kubeClient, executor, &tsRoundTripperParams{
 		timeout:           timeout,
 		timeoutExponent:   timeoutExponent,
 		disableKeepAlive:  disableKeepAlive,
@@ -208,8 +206,13 @@ func Start(ctx context.Context, logger *zap.Logger, port int, executorURL string
 		maxRetries:        maxRetries,
 		svcAddrRetryCount: svcAddrRetryCount,
 	}, isDebugEnv, unTapServiceTimeout, throttler.MakeThrottler(svcAddrUpdateTimeout))
+	if err != nil {
+		return errors.Wrap(err, "error making HTTP trigger set")
+	}
 
-	go metrics.ServeMetrics(ctx, logger)
+	mgr.Add(ctx, func(ctx context.Context) {
+		metrics.ServeMetrics(ctx, "router", logger, mgr)
+	})
 
 	logger.Info("starting router", zap.Int("port", port))
 
@@ -217,5 +220,5 @@ func Start(ctx context.Context, logger *zap.Logger, port int, executorURL string
 	ctx, span := tracer.Start(ctx, "router/Start")
 	defer span.End()
 
-	serve(ctx, logger, port, triggers, displayAccessLog)
+	return serve(ctx, logger, mgr, port, triggers, displayAccessLog)
 }

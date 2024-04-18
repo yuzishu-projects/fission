@@ -1,8 +1,9 @@
 apiVersion: v2
 name: fission-all
-version: v1.19.0
-appVersion: v1.19.0
+version: v1.20.1
+appVersion: v1.20.1
 description: Fission is a fast serverless framework for Kubernetes.
+kubeVersion: ">=1.23.0-0"
 home: https://fission.io/
 icon: https://fission.io/images/fission-logo-white.svg
 sources:
@@ -22,3 +23,7 @@ maintainers:
     email: sanket@infracloud.io
 engine: gotpl
 type: application
+annotations:
+  artifacthub.io/signKey: |
+    fingerprint: 2EAE29FDF8A387050C82CD5ABBDD4FD6A1FFCBF6
+    url: https://raw.githubusercontent.com/fission/fission-charts/main/public_key/pgp_keys.asc

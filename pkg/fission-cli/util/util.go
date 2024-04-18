@@ -99,15 +99,15 @@ func KubifyName(old string) string {
 	newName := strings.ToLower(old)
 
 	// replace disallowed chars with '-'
-	inv, _ := regexp.Compile("[^-a-z0-9]")
+	inv := regexp.MustCompile("[^-a-z0-9]")
 	newName = string(inv.ReplaceAll([]byte(newName), []byte("-")))
 
 	// trim leading non-alphabetic
-	leadingnonalpha, _ := regexp.Compile("^[^a-z]+")
+	leadingnonalpha := regexp.MustCompile("^[^a-z]+")
 	newName = string(leadingnonalpha.ReplaceAll([]byte(newName), []byte{}))
 
 	// trim trailing
-	trailing, _ := regexp.Compile("[^a-z0-9]+$")
+	trailing := regexp.MustCompile("[^a-z0-9]+$")
 	newName = string(trailing.ReplaceAll([]byte(newName), []byte{}))
 
 	// truncate to length
@@ -170,7 +170,7 @@ func GetVersion(ctx context.Context, input cli.Input, cmdClient cmd.Client) info
 func GetServerInfo(input cli.Input, cmdClient cmd.Client) *info.ServerInfo {
 
 	var serverInfo info.ServerInfo
-	serverURL, err := getRouterURL(input.Context(), cmdClient)
+	serverURL, err := GetRouterURL(input.Context(), cmdClient)
 	if err != nil {
 		console.Warn("could not connect to server")
 		return &serverInfo
@@ -212,7 +212,12 @@ func GetServerInfo(input cli.Input, cmdClient cmd.Client) *info.ServerInfo {
 	return &serverInfo
 }
 
-func getRouterURL(ctx context.Context, cmdClient cmd.Client) (serverURL *url.URL, err error) {
+func GetRouterURL(ctx context.Context, cmdClient cmd.Client) (serverURL *url.URL, err error) {
+	routerURL := os.Getenv("FISSION_ROUTER_URL")
+	if len(routerURL) > 0 {
+		return url.Parse(routerURL)
+	}
+
 	// Portforward to the fission router
 	localRouterPort, err := SetupPortForward(ctx, cmdClient, GetFissionNamespace(), "application=fission-router")
 	if err != nil {
@@ -224,26 +229,6 @@ func getRouterURL(ctx context.Context, cmdClient cmd.Client) (serverURL *url.URL
 		return serverURL, err
 	}
 	return serverURL, err
-}
-
-func GetServerURL(input cli.Input, client cmd.Client) (serverUrl string, err error) {
-	serverUrl = input.GlobalString(flagkey.Server)
-	if len(serverUrl) == 0 {
-		// starts local portforwarder etc.
-		serverUrl, err = GetApplicationUrl(input.Context(), client, "application=fission-api")
-		if err != nil {
-			return "", err
-		}
-	}
-
-	isHTTPS := strings.Index(serverUrl, "https://") == 0
-	isHTTP := strings.Index(serverUrl, "http://") == 0
-
-	if !(isHTTP || isHTTPS) {
-		serverUrl = "http://" + serverUrl
-	}
-
-	return serverUrl, nil
 }
 
 func GetResourceReqs(input cli.Input, resReqs *v1.ResourceRequirements) (*v1.ResourceRequirements, error) {
@@ -463,6 +448,10 @@ func ApplyLabelsAndAnnotations(input cli.Input, objectMeta *metav1.ObjectMeta) e
 }
 
 func GetStorageURL(ctx context.Context, client cmd.Client) (*url.URL, error) {
+	storagesvcURL := os.Getenv("FISSION_STORAGESVC_URL")
+	if len(storagesvcURL) > 0 {
+		return url.Parse(storagesvcURL)
+	}
 	storageLocalPort, err := SetupPortForward(ctx, client, GetFissionNamespace(), "application=fission-storage")
 	if err != nil {
 		return nil, err
@@ -522,28 +511,6 @@ func ConfigMapExists(ctx context.Context, m *metav1.ObjectMeta, kClient kubernet
 	return err
 }
 
-func GetSvcName(ctx context.Context, kClient kubernetes.Interface, application string) (string, error) {
-	var podNamespace = os.Getenv("POD_NAMESPACE")
-	if podNamespace == "" {
-		podNamespace = "fission"
-	}
-
-	appLabelSelector := "application=" + application
-
-	services, err := kClient.CoreV1().Services(podNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: appLabelSelector,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	if len(services.Items) > 1 || len(services.Items) == 0 {
-		return "", errors.Errorf("more than one service found for application=%s", application)
-	}
-	service := services.Items[0]
-	return service.Name + "." + podNamespace, nil
-}
-
 // FunctionPodLogs : Get logs for a function directly from pod
 func FunctionPodLogs(ctx context.Context, fnName, ns string, client cmd.Client) (err error) {
 
@@ -582,8 +549,7 @@ func FunctionPodLogs(ctx context.Context, fnName, ns string, client cmd.Client) 
 	})
 
 	if len(pods) <= 0 {
-		return errors.New("no active pods found")
-
+		return errors.New("no active pods found for function in namespace " + podNs)
 	}
 
 	// get the pod with highest resource version

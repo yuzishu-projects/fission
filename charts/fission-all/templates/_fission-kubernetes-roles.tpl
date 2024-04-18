@@ -63,44 +63,6 @@ rules:
   - list
   - watch
 {{- end }}
-{{- define "controller-kuberules" }}
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - list
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  - secrets
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
-  - namespaces
-  verbs:
-  - get
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - apiextensions.k8s.io
-  resources:
-  - customresourcedefinitions
-  verbs:
-  - get
-  - list
-  - watch
-{{- end }}
 {{- define "executor-kuberules" }}
 rules:
 - apiGroups:
@@ -109,10 +71,19 @@ rules:
   - pods
   - services
   - replicationcontrollers
-  - events
   verbs:
   - create
   - delete
+  - get
+  - list
+  - watch
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
   - get
   - list
   - watch
@@ -233,54 +204,6 @@ rules:
   - list
   - watch
 {{- end }}
-{{- define "kafka-kuberules" }}
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  - pods
-  - secrets
-  - services
-  - replicationcontrollers
-  - events
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - watch
-  - patch
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  - secrets
-  verbs:
-  - get
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  - deployments/scale
-  - replicasets
-  verbs:
-  - create
-  - get
-  - list
-  - watch
-  - update
-  - patch
-  - delete
-- apiGroups:
-  - apiextensions.k8s.io
-  resources:
-  - customresourcedefinitions
-  verbs:
-  - get
-  - list
-  - watch
-{{- end }}
 {{- define "keda-kuberules" }}
 rules:
 - apiGroups:
@@ -289,10 +212,19 @@ rules:
   - pods
   - services
   - replicationcontrollers
-  - events
   verbs:
   - create
   - delete
+  - get
+  - list
+  - watch
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
   - get
   - list
   - watch

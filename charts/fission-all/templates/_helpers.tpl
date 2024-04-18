@@ -89,6 +89,12 @@ This template generates the image name for the deployment depending on the value
 {{- end }}
 
 {{- define "fission-resource-namespace.envs" }}
+- name: FISSION_BUILDER_NAMESPACE
+  value: "{{ .Values.builderNamespace }}"
+- name: FISSION_FUNCTION_NAMESPACE
+  value: "{{ .Values.functionNamespace }}"
+- name: FISSION_DEFAULT_NAMESPACE
+  value: "{{ .Values.defaultNamespace }}"
 - name: FISSION_RESOURCE_NAMESPACES
 {{- if gt (len .Values.additionalFissionNamespaces) 0 }}
   value: "{{ .Values.defaultNamespace }},{{ join "," .Values.additionalFissionNamespaces }}"
@@ -96,6 +102,13 @@ This template generates the image name for the deployment depending on the value
   value: {{ .Values.defaultNamespace }}  
 {{- end }}
 {{- end }}
+
+{{- define "kube_client.envs" }}
+- name: KUBE_CLIENT_QPS
+  value: "{{ .Values.kubernetesClientQPS }}"
+- name: KUBE_CLIENT_BURST
+  value: "{{ .Values.kubernetesClientBurst }}"
+{{- end}}
 
 {{/*
 Define the svc's name

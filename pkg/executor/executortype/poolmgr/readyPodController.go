@@ -30,6 +30,9 @@ func (gp *GenericPool) readyPodEventHandlers() k8sCache.ResourceEventHandlerFunc
 }
 
 func (gp *GenericPool) setupReadyPodController() error {
+	// avoid concurrent access to gp.deployment
+	gp.lock.Lock()
+	defer gp.lock.Unlock()
 	gp.readyPodQueue = workqueue.NewDelayingQueue()
 	informerFactory, err := utils.GetInformerFactoryByReadyPod(gp.kubernetesClient, gp.fnNamespace, gp.deployment.Spec.Selector)
 	if err != nil {
@@ -38,7 +41,10 @@ func (gp *GenericPool) setupReadyPodController() error {
 	podInformer := informerFactory.Core().V1().Pods()
 	gp.readyPodLister = podInformer.Lister()
 	gp.readyPodListerSynced = podInformer.Informer().HasSynced
-	podInformer.Informer().AddEventHandler(gp.readyPodEventHandlers())
+	_, err = podInformer.Informer().AddEventHandler(gp.readyPodEventHandlers())
+	if err != nil {
+		return err
+	}
 	go podInformer.Informer().Run(gp.stopReadyPodControllerCh)
 	gp.logger.Info("readyPod controller started", zap.String("env", gp.env.ObjectMeta.Name), zap.String("envID", string(gp.env.ObjectMeta.UID)))
 	return nil

@@ -17,7 +17,7 @@ limitations under the License.
 package v1
 
 import (
-	asv2beta2 "k8s.io/api/autoscaling/v2beta2"
+	asv2 "k8s.io/api/autoscaling/v2"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -399,6 +399,11 @@ type (
 		// +optional
 		OnceOnly bool `json:"onceOnly,omitempty"`
 
+		// RetainPods specifies the number of specialized pods that should be retained after serving requests
+		// This is optional. If not specified default value will be taken as 0
+		// +optional
+		RetainPods int `json:"retainPods,omitempty"`
+
 		// Podspec specifies podspec to use for executor type container based functions
 		// Different arguments mentioned for container based function are populated inside a pod.
 		// +optional
@@ -470,12 +475,12 @@ type (
 		// created for the function.
 		// Applicable for executor type newdeploy and container.
 		// +optional
-		Metrics []asv2beta2.MetricSpec `json:"hpaMetrics,omitempty"`
+		Metrics []asv2.MetricSpec `json:"hpaMetrics,omitempty"`
 
 		// hpaBehavior is the behavior of HPA when scaling in up/down direction.
 		// Applicable for executor type newdeploy and container.
 		// +optional
-		Behavior *asv2beta2.HorizontalPodAutoscalerBehavior `json:"hpaBehavior,omitempty"`
+		Behavior *asv2.HorizontalPodAutoscalerBehavior `json:"hpaBehavior,omitempty"`
 	}
 
 	// FunctionReferenceType refers to type of Function
@@ -746,7 +751,7 @@ type (
 		// +optional
 		FunctionReference FunctionReference `json:"functionref"`
 
-		// Type of message queue (NATS, Kafka, AzureQueue)
+		// Type of message queue
 		// +optional
 		MessageQueueType MessageQueueType `json:"messageQueueType"`
 
@@ -874,6 +879,10 @@ func (fn Function) GetConcurrency() int {
 		return DefaultConcurrency
 	}
 	return fn.Spec.Concurrency
+}
+
+func (fn Function) GetRetainPods() int {
+	return fn.Spec.RetainPods
 }
 
 func (fn Function) GetRequestPerPod() int {

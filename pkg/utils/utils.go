@@ -31,12 +31,12 @@ import (
 
 	"github.com/mholt/archiver/v3"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 	"golang.org/x/net/context/ctxhttp"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
+	"github.com/fission/fission/pkg/utils/uuid"
 )
 
 func UrlForFunction(name, namespace string) string {
@@ -60,11 +60,7 @@ func GetFunctionIstioServiceName(fnName, fnNamespace string) string {
 
 // GetTempDir creates and return a temporary directory
 func GetTempDir() (string, error) {
-	id, err := uuid.NewV4()
-	if err != nil {
-		return "", err
-	}
-	tmpDir := id.String()
+	tmpDir := uuid.NewString()
 	dir, err := os.MkdirTemp("", tmpDir)
 	return dir, err
 }
@@ -234,4 +230,32 @@ func GetUIntValueFromEnv(envVar string) (uint, error) {
 		return 0, err
 	}
 	return uint(value), nil
+}
+
+func GetIntValueFromEnv(envVar string) (int, error) {
+	s, err := GetStringValueFromEnv(envVar)
+	if err != nil {
+		return 0, err
+	}
+	value, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
+func FindFreePort() (int, error) {
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		return 0, err
+	}
+
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	err = listener.Close()
+	if err != nil {
+		return 0, err
+	}
+
+	return port, nil
 }

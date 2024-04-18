@@ -59,6 +59,7 @@ type (
 	// GenericPool represents a generic environment pool
 	GenericPool struct {
 		logger                   *zap.Logger
+		lock                     sync.Mutex
 		env                      *fv1.Environment
 		deployment               *appsv1.Deployment            // kubernetes deployment
 		fnNamespace              string                        // namespace to keep our resources
@@ -130,6 +131,7 @@ func MakeGenericPool(
 		instanceID:               instanceID,
 		podFSVCMap:               sync.Map{},
 		podSpecPatch:             podSpecPatch,
+		lock:                     sync.Mutex{},
 	}
 
 	gp.runtimeImagePullPolicy = utils.GetImagePullPolicy(os.Getenv("RUNTIME_IMAGE_PULL_POLICY"))
@@ -201,9 +203,18 @@ func (gp *GenericPool) updateCPUUtilizationSvc(ctx context.Context) {
 			}
 			if value, ok := gp.podFSVCMap.Load(val.ObjectMeta.Name); ok {
 				if valArray, ok1 := value.([]interface{}); ok1 {
-					function, address := valArray[0], valArray[1]
-					gp.fsCache.SetCPUUtilizaton(function.(string), address.(string), p)
-					gp.logger.Info(fmt.Sprintf("updated function %s, address %s, cpuUsage %+v", function.(string), address.(string), p))
+					function, ok2 := valArray[0].(crd.CacheKeyURG)
+					if !ok2 {
+						gp.logger.Error("failed to convert function to type", zap.Any("function", function))
+						return
+					}
+					address, ok2 := valArray[1].(string)
+					if !ok2 {
+						gp.logger.Error("failed to convert address to string", zap.Any("address", address))
+						return
+					}
+					gp.fsCache.SetCPUUtilizaton(function, address, p)
+					gp.logger.Info("updated function cpu usage", zap.Any("function", function), zap.String("address", address), zap.Any("cpuUsage", p))
 				}
 			}
 		}
@@ -322,13 +333,13 @@ func (gp *GenericPool) choosePod(ctx context.Context, newLabels map[string]strin
 			// So we have to check both of them to ensure the patch success.
 			for k, v := range newLabels {
 				if newPod.Labels[k] != v {
-					return "", nil, errors.Errorf("value of necessary labels '%v' mismatch: want '%v', get '%v'",
+					return "", nil, errors.Errorf("value of necessary labels '%s' mismatch: want '%s', get '%v'",
 						k, v, newPod.Labels[k])
 				}
 			}
 			for k, v := range annotations {
 				if newPod.Annotations[k] != v {
-					return "", nil, errors.Errorf("value of necessary annotations '%v' mismatch: want '%v', get '%v'",
+					return "", nil, errors.Errorf("value of necessary annotations '%s' mismatch: want '%s', get '%v'",
 						k, v, newPod.Annotations[k])
 				}
 			}
@@ -386,9 +397,9 @@ func (gp *GenericPool) getFetcherURL(podIP string) string {
 	var baseURL string
 
 	if isv6 { // We use bracket if the IP is in IPv6.
-		baseURL = fmt.Sprintf("http://[%v]:8000/", podIP)
+		baseURL = fmt.Sprintf("http://[%s]:8000/", podIP)
 	} else {
-		baseURL = fmt.Sprintf("http://%v:8000/", podIP)
+		baseURL = fmt.Sprintf("http://%s:8000/", podIP)
 	}
 	return baseURL
 }
@@ -438,7 +449,7 @@ func (gp *GenericPool) specializePod(ctx context.Context, pod *apiv1.Pod, fn *fv
 	// specialize pod with service
 	if gp.useIstio {
 		svc := utils.GetFunctionIstioServiceName(fn.ObjectMeta.Name, fn.ObjectMeta.Namespace)
-		podIP = fmt.Sprintf("%v.%v", svc, gp.fnNamespace)
+		podIP = fmt.Sprintf("%s.%s", svc, gp.fnNamespace)
 	}
 
 	// tell fetcher to get the function.
@@ -546,7 +557,7 @@ func (gp *GenericPool) getFuncSvc(ctx context.Context, fn *fv1.Function) (*fscac
 
 	var svcHost string
 	if gp.useSvc && !gp.useIstio {
-		svcName := fmt.Sprintf("svc-%v", fn.ObjectMeta.Name)
+		svcName := fmt.Sprintf("svc-%s", fn.ObjectMeta.Name)
 		if len(fn.ObjectMeta.UID) > 0 {
 			svcName = fmt.Sprintf("%s-%v", svcName, fn.ObjectMeta.UID)
 		}
@@ -558,7 +569,7 @@ func (gp *GenericPool) getFuncSvc(ctx context.Context, fn *fv1.Function) (*fscac
 		}
 		if svc.ObjectMeta.Name != svcName {
 			go gp.scheduleDeletePod(context.Background(), pod.ObjectMeta.Name)
-			return nil, errors.Errorf("sanity check failed for svc %v", svc.ObjectMeta.Name)
+			return nil, errors.Errorf("sanity check failed for svc %s", svc.ObjectMeta.Name)
 		}
 
 		// the fission router isn't in the same namespace, so return a
@@ -573,7 +584,7 @@ func (gp *GenericPool) getFuncSvc(ctx context.Context, fn *fv1.Function) (*fscac
 
 	otelUtils.SpanTrackEvent(ctx, "addFunctionLabel", otelUtils.GetAttributesForPod(pod)...)
 	// patch svc-host and resource version to the pod annotations for new executor to adopt the pod
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%v":"%v","%v":"%v"}}}`,
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s","%s":"%s"}}}`,
 		fv1.ANNOTATION_SVC_HOST, svcHost, fv1.FUNCTION_RESOURCE_VERSION, fn.ObjectMeta.ResourceVersion)
 	p, err := gp.kubernetesClient.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, k8sTypes.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{})
 	if err != nil {
@@ -622,8 +633,8 @@ func (gp *GenericPool) getFuncSvc(ctx context.Context, fn *fv1.Function) (*fscac
 	}
 
 	gp.fsCache.PodToFsvc.Store(pod.GetObjectMeta().GetName(), fsvc)
-	gp.podFSVCMap.Store(pod.ObjectMeta.Name, []interface{}{crd.CacheKey(fsvc.Function), fsvc.Address})
-	gp.fsCache.AddFunc(ctx, *fsvc, fn.GetRequestPerPod())
+	gp.podFSVCMap.Store(pod.ObjectMeta.Name, []interface{}{crd.CacheKeyURGFromMeta(fsvc.Function), fsvc.Address})
+	gp.fsCache.AddFunc(ctx, *fsvc, fn.GetRequestPerPod(), fn.GetRetainPods())
 
 	logger.Info("added function service",
 		zap.String("pod", pod.ObjectMeta.Name),
@@ -643,6 +654,8 @@ func (gp *GenericPool) getPercent(cpuUsage resource.Quantity, percentage float64
 
 // destroys the pool -- the deployment, replicaset and pods
 func (gp *GenericPool) destroy(ctx context.Context) error {
+	gp.lock.Lock()
+	defer gp.lock.Unlock()
 	close(gp.stopReadyPodControllerCh)
 
 	deletePropagation := metav1.DeletePropagationBackground

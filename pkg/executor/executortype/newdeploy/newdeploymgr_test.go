@@ -7,12 +7,10 @@ import (
 	"testing"
 	"time"
 
-	uuid "github.com/satori/go.uuid"
 	"github.com/stretchr/testify/assert"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/fake"
 	k8sCache "k8s.io/client-go/tools/cache"
@@ -23,6 +21,8 @@ import (
 	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 	"github.com/fission/fission/pkg/utils"
 	"github.com/fission/fission/pkg/utils/loggerfactory"
+	"github.com/fission/fission/pkg/utils/manager"
+	"github.com/fission/fission/pkg/utils/uuid"
 )
 
 const (
@@ -36,6 +36,8 @@ const (
 
 func TestRefreshFuncPods(t *testing.T) {
 	os.Setenv("DEBUG_ENV", "true")
+	mgr := manager.New()
+	defer mgr.Wait()
 	logger := loggerfactory.GetLogger()
 	kubernetesClient := fake.NewSimpleClientset()
 	fissionClient := fClient.NewSimpleClientset()
@@ -71,7 +73,9 @@ func TestRefreshFuncPods(t *testing.T) {
 	}
 	ndm.nsResolver = &nsResolver
 
-	go ndm.Run(ctx)
+	mgr.Add(ctx, func(ctx context.Context) {
+		ndm.Run(ctx, mgr)
+	})
 	t.Log("New deploy manager started")
 
 	for _, f := range factory {
@@ -120,15 +124,11 @@ func TestRefreshFuncPods(t *testing.T) {
 	}
 	assert.Equal(t, envRes.ObjectMeta.Name, envName)
 
-	funcUID, err := uuid.NewV4()
-	if err != nil {
-		t.Fatal(err)
-	}
 	funcSpec := fv1.Function{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      functionName,
 			Namespace: defaultNamespace,
-			UID:       types.UID(funcUID.String()),
+			UID:       uuid.NewUUID(),
 		},
 		Spec: fv1.FunctionSpec{
 			Environment: fv1.EnvironmentReference{

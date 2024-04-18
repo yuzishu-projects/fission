@@ -65,32 +65,22 @@ func (opts *TestSubCommand) do(input cli.Input) error {
 		Name:      fnName,
 		Namespace: namespace,
 	}
-	routerURL := os.Getenv("FISSION_ROUTER")
-	if len(routerURL) != 0 {
-		console.Warn("The environment variable FISSION_ROUTER is no longer supported for this command")
-	}
 
-	// Portforward to the fission router
-	localRouterPort, err := util.SetupPortForward(input.Context(), opts.Client(), util.GetFissionNamespace(), "application=fission-router")
+	routerURL, err := util.GetRouterURL(input.Context(), opts.Client())
 	if err != nil {
-		return err
+		return errors.Wrap(err, "error getting router URL")
 	}
-	fnURL := "http://127.0.0.1:" + localRouterPort + util.UrlForFunction(m.Name, m.Namespace)
+	fnURI := util.UrlForFunction(m.Name, m.Namespace)
 	if input.IsSet(flagkey.FnSubPath) {
 		subPath := input.String(flagkey.FnSubPath)
 		if !strings.HasPrefix(subPath, "/") {
-			fnURL = fnURL + "/" + subPath
+			fnURI = fnURI + "/" + subPath
 		} else {
-			fnURL = fnURL + subPath
+			fnURI = fnURI + subPath
 		}
 	}
-
-	functionUrl, err := url.Parse(fnURL)
-	if err != nil {
-		return err
-	}
-
-	console.Verbose(2, "Function test url: %v", functionUrl.String())
+	fnURL := routerURL.JoinPath(fnURI)
+	console.Verbose(2, "Function test url: %v", fnURL.String())
 
 	queryParams := input.StringSlice(flagkey.FnTestQuery)
 	if len(queryParams) > 0 {
@@ -109,7 +99,7 @@ func (opts *TestSubCommand) do(input cli.Input) error {
 			}
 			query.Set(key, value)
 		}
-		functionUrl.RawQuery = query.Encode()
+		fnURL.RawQuery = query.Encode()
 	}
 
 	var (
@@ -131,7 +121,7 @@ func (opts *TestSubCommand) do(input cli.Input) error {
 		ctx = input.Context()
 	} else {
 		var closeCtx context.CancelFunc
-		ctx, closeCtx = context.WithTimeout(input.Context(), reqTimeout*time.Second)
+		ctx, closeCtx = context.WithTimeoutCause(input.Context(), reqTimeout*time.Second, fmt.Errorf("function request timeout (%d)s exceeded", reqTimeout))
 		defer closeCtx()
 	}
 
@@ -145,7 +135,7 @@ func (opts *TestSubCommand) do(input cli.Input) error {
 	if err != nil {
 		return err
 	}
-	resp, err := doHTTPRequest(ctx, functionUrl.String(),
+	resp, err := doHTTPRequest(ctx, fnURL.String(),
 		input.StringSlice(flagkey.FnTestHeader),
 		method,
 		input.String(flagkey.FnTestBody))
@@ -164,13 +154,13 @@ func (opts *TestSubCommand) do(input cli.Input) error {
 		return nil
 	}
 
-	console.Errorf("Error calling function %s: %d; Please try again or fix the error: %s\n", m.Name, resp.StatusCode, string(body))
-	err = printPodLogs(input.Context(), opts.Client(), m)
+	console.Errorf("calling function %s: %d; Please try again or fix the error: %s\n", m.Name, resp.StatusCode, string(body))
+	err = util.FunctionPodLogs(input.Context(), m.Name, m.Namespace, opts.Client())
 	if err != nil {
-		console.Errorf("Error getting function logs from controller: %v. Try to get logs from log database.", err)
+		console.Errorf("getting function logs: %v. Try to get logs from log database.", err)
 		err = Log(input)
 		if err != nil {
-			return errors.Wrapf(err, "error retrieving function log from log database")
+			console.Errorf("getting function logs from log database: %v", err)
 		}
 	}
 	return errors.New("error getting function response")
@@ -235,14 +225,4 @@ func doHTTPRequest(ctx context.Context, url string, headers []string, method, bo
 	}
 
 	return resp, nil
-}
-
-func printPodLogs(ctx context.Context, client cmd.Client, fnMeta *metav1.ObjectMeta) error {
-	err := util.FunctionPodLogs(ctx, fnMeta.Name, fnMeta.Namespace, client)
-
-	if err != nil {
-		return errors.Wrap(err, "error executing get logs request")
-	}
-
-	return nil
 }

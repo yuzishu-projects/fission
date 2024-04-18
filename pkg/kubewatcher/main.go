@@ -24,10 +24,10 @@ import (
 
 	"github.com/fission/fission/pkg/crd"
 	"github.com/fission/fission/pkg/publisher"
+	"github.com/fission/fission/pkg/utils/manager"
 )
 
-func Start(ctx context.Context, logger *zap.Logger, routerUrl string) error {
-	clientGen := crd.NewClientGenerator()
+func Start(ctx context.Context, clientGen crd.ClientGeneratorInterface, logger *zap.Logger, mgr manager.Interface, routerUrl string) error {
 	fissionClient, err := clientGen.GetFissionClient()
 	if err != nil {
 		return errors.Wrap(err, "failed to get fission client")
@@ -37,15 +37,18 @@ func Start(ctx context.Context, logger *zap.Logger, routerUrl string) error {
 		return errors.Wrap(err, "failed to get kubernetes client")
 	}
 
-	err = crd.WaitForCRDs(ctx, logger, fissionClient)
+	err = crd.WaitForFunctionCRDs(ctx, logger, fissionClient)
 	if err != nil {
 		return errors.Wrap(err, "error waiting for CRDs")
 	}
 
 	poster := publisher.MakeWebhookPublisher(logger, routerUrl)
 	kubeWatch := MakeKubeWatcher(ctx, logger, kubeClient, poster)
-	ws := MakeWatchSync(ctx, logger, fissionClient, kubeWatch)
-	ws.Run(ctx)
+	ws, err := MakeWatchSync(ctx, logger, fissionClient, kubeWatch)
+	if err != nil {
+		return errors.Wrap(err, "error making watch sync")
+	}
+	ws.Run(ctx, mgr)
 
 	return nil
 }

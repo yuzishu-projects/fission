@@ -18,6 +18,7 @@ package newdeploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -26,8 +27,6 @@ import (
 	"sync"
 	"time"
 
-	multierror "github.com/hashicorp/go-multierror"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	apiv1 "k8s.io/api/core/v1"
@@ -54,6 +53,7 @@ import (
 	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 	"github.com/fission/fission/pkg/throttler"
 	"github.com/fission/fission/pkg/utils"
+	"github.com/fission/fission/pkg/utils/manager"
 	"github.com/fission/fission/pkg/utils/maps"
 	otelUtils "github.com/fission/fission/pkg/utils/otel"
 )
@@ -148,16 +148,22 @@ func MakeNewDeploy(
 		nd.svcListerSynced[ns] = informerFactory.Core().V1().Services().Informer().HasSynced
 	}
 	for _, factory := range finformerFactory {
-		factory.Core().V1().Functions().Informer().AddEventHandler(nd.FunctionEventHandlers(ctx))
+		_, err := factory.Core().V1().Functions().Informer().AddEventHandler(nd.FunctionEventHandlers(ctx))
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, factory := range finformerFactory {
-		factory.Core().V1().Environments().Informer().AddEventHandler(nd.EnvEventHandlers(ctx))
+		_, err := factory.Core().V1().Environments().Informer().AddEventHandler(nd.EnvEventHandlers(ctx))
+		if err != nil {
+			return nil, err
+		}
 	}
 	return nd, nil
 }
 
 // Run start the function and environment controller along with an object reaper.
-func (deploy *NewDeploy) Run(ctx context.Context) {
+func (deploy *NewDeploy) Run(ctx context.Context, mgr manager.Interface) {
 	waitSynced := make([]k8sCache.InformerSynced, 0)
 	for _, deplListerSynced := range deploy.deplListerSynced {
 		waitSynced = append(waitSynced, deplListerSynced)
@@ -169,7 +175,9 @@ func (deploy *NewDeploy) Run(ctx context.Context) {
 	if ok := k8sCache.WaitForCacheSync(ctx.Done(), waitSynced...); !ok {
 		deploy.logger.Fatal("failed to wait for caches to sync")
 	}
-	go deploy.idleObjectReaper(ctx)
+	mgr.Add(ctx, func(ctx context.Context) {
+		deploy.idleObjectReaper(ctx)
+	})
 }
 
 // GetTypeName returns the executor type name.
@@ -195,12 +203,12 @@ func (deploy *NewDeploy) DeleteFuncSvcFromCache(ctx context.Context, fsvc *fscac
 }
 
 // UnTapService has not been implemented for NewDeployment.
-func (deploy *NewDeploy) UnTapService(ctx context.Context, key string, svcHost string) {
+func (deploy *NewDeploy) UnTapService(ctx context.Context, fnMeta *metav1.ObjectMeta, svcHost string) {
 	// Not Implemented for NewDeployment. Will be used when support of concurrent specialization of same function is added.
 }
 
 // MarkSpecializationFailure has not been implemented for NewDeployment.
-func (deploy *NewDeploy) MarkSpecializationFailure(ctx context.Context, key string) {
+func (deploy *NewDeploy) MarkSpecializationFailure(ctx context.Context, fnMeta *metav1.ObjectMeta) {
 	// Not Implemented for NewDeployment. Will be used when support of concurrent specialization of same function is added.
 }
 
@@ -332,27 +340,27 @@ func (deploy *NewDeploy) AdoptExistingResources(ctx context.Context) {
 func (deploy *NewDeploy) CleanupOldExecutorObjects(ctx context.Context) {
 	deploy.logger.Info("Newdeploy starts to clean orphaned resources", zap.String("instanceID", deploy.instanceID))
 
-	errs := &multierror.Error{}
+	var errs error
 	listOpts := metav1.ListOptions{
 		LabelSelector: labels.Set(map[string]string{fv1.EXECUTOR_TYPE: string(fv1.ExecutorTypeNewdeploy)}).AsSelector().String(),
 	}
 
 	err := reaper.CleanupHpa(ctx, deploy.logger, deploy.kubernetesClient, deploy.instanceID, listOpts)
 	if err != nil {
-		errs = multierror.Append(errs, err)
+		errs = errors.Join(errs, err)
 	}
 
 	err = reaper.CleanupDeployments(ctx, deploy.logger, deploy.kubernetesClient, deploy.instanceID, listOpts)
 	if err != nil {
-		errs = multierror.Append(errs, err)
+		errs = errors.Join(errs, err)
 	}
 
 	err = reaper.CleanupServices(ctx, deploy.logger, deploy.kubernetesClient, deploy.instanceID, listOpts)
 	if err != nil {
-		errs = multierror.Append(errs, err)
+		errs = errors.Join(errs, err)
 	}
 
-	if errs.ErrorOrNil() != nil {
+	if errs != nil {
 		// TODO retry reaper; logged and ignored for now
 		deploy.logger.Error("Failed to cleanup old executor objects", zap.Error(err))
 	}
@@ -392,7 +400,7 @@ func (deploy *NewDeploy) createFunction(ctx context.Context, fn *fv1.Function) (
 			zap.Error(err),
 			zap.String("function_name", fn.ObjectMeta.Name),
 			zap.String("function_namespace", fn.ObjectMeta.Namespace))
-		return nil, errors.Wrapf(err, "%s %s_%s", e, fn.ObjectMeta.Name, fn.ObjectMeta.Namespace)
+		return nil, fmt.Errorf("error creating k8s resources for function %s: %w", k8sCache.MetaObjectToName(fn), err)
 	}
 
 	fsvc, ok := fsvcObj.(*fscache.FuncSvc)
@@ -410,9 +418,9 @@ func (deploy *NewDeploy) deleteFunction(ctx context.Context, fn *fv1.Function) e
 	}
 	err := deploy.fnDelete(ctx, fn)
 	if err != nil {
-		err = errors.Wrapf(err, "error deleting kubernetes objects of function %v", fn.ObjectMeta)
+		return fmt.Errorf("error deleting kubernetes objects of function %s: %w", k8sCache.MetaObjectToName(fn), err)
 	}
-	return err
+	return nil
 }
 
 func (deploy *NewDeploy) fnCreate(ctx context.Context, fn *fv1.Function) (*fscache.FuncSvc, error) {
@@ -447,22 +455,22 @@ func (deploy *NewDeploy) fnCreate(ctx context.Context, fn *fv1.Function) (*fscac
 	if err != nil {
 		deploy.logger.Error("error creating service", zap.Error(err), zap.String("service", objName))
 		go cleanupFunc(context.Background(), ns, objName)
-		return nil, errors.Wrapf(err, "error creating service %v", objName)
+		return nil, fmt.Errorf("error creating service %s: %w", objName, err)
 	}
-	svcAddress := fmt.Sprintf("%v.%v", svc.Name, svc.Namespace)
+	svcAddress := fmt.Sprintf("%s.%s", svc.Name, svc.Namespace)
 
 	depl, err := deploy.createOrGetDeployment(ctx, fn, env, objName, deployLabels, deployAnnotations, ns)
 	if err != nil {
 		deploy.logger.Error("error creating deployment", zap.Error(err), zap.String("deployment", objName))
 		go cleanupFunc(context.Background(), ns, objName)
-		return nil, errors.Wrapf(err, "error creating deployment %v", objName)
+		return nil, fmt.Errorf("error creating deployment %s: %w", objName, err)
 	}
 
 	hpa, err := deploy.hpaops.CreateOrGetHpa(ctx, objName, &fn.Spec.InvokeStrategy.ExecutionStrategy, depl, deployLabels, deployAnnotations)
 	if err != nil {
 		deploy.logger.Error("error creating HPA", zap.Error(err), zap.String("hpa", objName))
 		go cleanupFunc(context.Background(), ns, objName)
-		return nil, errors.Wrapf(err, "error creating the HPA %v", objName)
+		return nil, fmt.Errorf("error creating HPA %s: %w", objName, err)
 	}
 
 	kubeObjRefs := []apiv1.ObjectReference{
@@ -558,8 +566,7 @@ func (deploy *NewDeploy) updateFunction(ctx context.Context, oldFn *fv1.Function
 
 		fsvc, err := deploy.fsCache.GetByFunctionUID(newFn.ObjectMeta.UID)
 		if err != nil {
-			err = errors.Wrapf(err, "error updating function due to unable to find function service cache: %v", oldFn)
-			return err
+			return fmt.Errorf("error updating function due to unable to find function service cache %s: %w", k8sCache.MetaObjectToName(oldFn), err)
 		}
 
 		hpa, err := deploy.hpaops.GetHpa(ctx, ns, fsvc.Name)
@@ -645,8 +652,7 @@ func (deploy *NewDeploy) updateFunction(ctx context.Context, oldFn *fv1.Function
 func (deploy *NewDeploy) updateFuncDeployment(ctx context.Context, fn *fv1.Function, env *fv1.Environment) error {
 	fsvc, err := deploy.fsCache.GetByFunctionUID(fn.ObjectMeta.UID)
 	if err != nil {
-		err = errors.Wrapf(err, "error updating function due to unable to find function service cache: %v", fn)
-		return err
+		return fmt.Errorf("error updating function due to unable to find function service cache: %s: %w", k8sCache.MetaObjectToName(fn), err)
 	}
 	fnObjName := fsvc.Name
 
@@ -684,7 +690,7 @@ func (deploy *NewDeploy) updateFuncDeployment(ctx context.Context, fn *fv1.Funct
 }
 
 func (deploy *NewDeploy) fnDelete(ctx context.Context, fn *fv1.Function) error {
-	multierr := &multierror.Error{}
+	var errs error
 
 	// GetByFunction uses resource version as part of cache key, however,
 	// the resource version in function metadata will be changed when a function
@@ -693,16 +699,14 @@ func (deploy *NewDeploy) fnDelete(ctx context.Context, fn *fv1.Function) error {
 	// fsvc entry.
 	fsvc, err := deploy.fsCache.GetByFunctionUID(fn.ObjectMeta.UID)
 	if err != nil {
-		err = errors.Wrap(err, fmt.Sprintf("fsvc not found in cache: %v", fn.ObjectMeta))
-		return err
+		return fmt.Errorf("fsvc not found in cache: %s: %w", k8sCache.MetaObjectToName(fn), err)
 	}
 
 	objName := fsvc.Name
 
 	_, err = deploy.fsCache.DeleteOld(fsvc, time.Second*0)
 	if err != nil {
-		multierr = multierror.Append(multierr,
-			errors.Wrap(err, "error deleting the function from cache"))
+		errs = errors.Join(errs, fmt.Errorf("error deleting the function from cache"))
 	}
 
 	// to support backward compatibility, if the function was created in default ns, we fall back to creating the
@@ -710,9 +714,9 @@ func (deploy *NewDeploy) fnDelete(ctx context.Context, fn *fv1.Function) error {
 	ns := deploy.nsResolver.GetFunctionNS(fn.ObjectMeta.Namespace)
 
 	err = deploy.cleanupNewdeploy(ctx, ns, objName)
-	multierr = multierror.Append(multierr, err)
+	errs = errors.Join(errs, err)
 
-	return multierr.ErrorOrNil()
+	return errs
 }
 
 // getObjName returns a unique name for kubernetes objects of function

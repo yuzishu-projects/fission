@@ -22,6 +22,7 @@ import (
 
 	"go.uber.org/zap"
 	apiv1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -39,25 +40,25 @@ func CleanupKubeObject(ctx context.Context, logger *zap.Logger, kubeClient kuber
 	switch strings.ToLower(kubeobj.Kind) {
 	case "pod":
 		err := kubeClient.CoreV1().Pods(kubeobj.Namespace).Delete(ctx, kubeobj.Name, metav1.DeleteOptions{})
-		if err != nil {
+		if err != nil && !k8serrors.IsNotFound(err) {
 			logger.Error("error cleaning up pod", zap.Error(err), zap.String("pod", kubeobj.Name))
 		}
 
 	case "service":
 		err := kubeClient.CoreV1().Services(kubeobj.Namespace).Delete(ctx, kubeobj.Name, metav1.DeleteOptions{})
-		if err != nil {
+		if err != nil && !k8serrors.IsNotFound(err) {
 			logger.Error("error cleaning up service", zap.Error(err), zap.String("service", kubeobj.Name))
 		}
 
 	case "deployment":
 		err := kubeClient.AppsV1().Deployments(kubeobj.Namespace).Delete(ctx, kubeobj.Name, delOpt)
-		if err != nil {
+		if err != nil && !k8serrors.IsNotFound(err) {
 			logger.Error("error cleaning up deployment", zap.Error(err), zap.String("deployment", kubeobj.Name))
 		}
 
 	case "horizontalpodautoscaler":
-		err := kubeClient.AutoscalingV2beta2().HorizontalPodAutoscalers(kubeobj.Namespace).Delete(ctx, kubeobj.Name, metav1.DeleteOptions{})
-		if err != nil {
+		err := kubeClient.AutoscalingV2().HorizontalPodAutoscalers(kubeobj.Namespace).Delete(ctx, kubeobj.Name, metav1.DeleteOptions{})
+		if err != nil && !k8serrors.IsNotFound(err) {
 			logger.Error("error cleaning up horizontalpodautoscaler", zap.Error(err), zap.String("horizontalpodautoscaler", kubeobj.Name))
 		}
 
@@ -180,7 +181,7 @@ func CleanupServices(ctx context.Context, logger *zap.Logger, client kubernetes.
 // CleanupHpa deletes horizontal pod autoscaler(s) for a given instanceID
 func CleanupHpa(ctx context.Context, logger *zap.Logger, client kubernetes.Interface, instanceID string, listOps metav1.ListOptions) error {
 	cleanupHpa := func(namespace string) error {
-		hpaList, err := client.AutoscalingV2beta2().HorizontalPodAutoscalers(namespace).List(ctx, listOps)
+		hpaList, err := client.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, listOps)
 		if err != nil {
 			return err
 		}
@@ -193,7 +194,7 @@ func CleanupHpa(ctx context.Context, logger *zap.Logger, client kubernetes.Inter
 			}
 			if ok && id != instanceID {
 				logger.Info("cleaning up HPA", zap.String("hpa", hpa.ObjectMeta.Name))
-				err := client.AutoscalingV2beta2().HorizontalPodAutoscalers(hpa.ObjectMeta.Namespace).Delete(ctx, hpa.ObjectMeta.Name, metav1.DeleteOptions{})
+				err := client.AutoscalingV2().HorizontalPodAutoscalers(hpa.ObjectMeta.Namespace).Delete(ctx, hpa.ObjectMeta.Name, metav1.DeleteOptions{})
 				if err != nil {
 					logger.Error("error cleaning up HPA",
 						zap.Error(err),
@@ -217,7 +218,7 @@ func CleanupHpa(ctx context.Context, logger *zap.Logger, client kubernetes.Inter
 
 func GetReaperNamespace() map[string]string {
 	ns := utils.DefaultNSResolver()
-	//to support backward compatibility we need to cleanup deployment and rolebinding created in function, buidler and default namespace as well
+	// to support backward compatibility we need to cleanup deployment and rolebinding created in function, buidler and default namespace as well
 	fissionResourceNs := ns.FissionNSWithOptions(utils.WithBuilderNs(), utils.WithFunctionNs(), utils.WithDefaultNs())
 	return fissionResourceNs
 }

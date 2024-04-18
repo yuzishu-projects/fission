@@ -28,9 +28,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mholt/archiver/v3"
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/zap"
 	"golang.org/x/net/context/ctxhttp"
@@ -75,7 +75,8 @@ func makeVolumeDir(dirPath string) error {
 	return os.MkdirAll(dirPath, os.ModeDir|0750)
 }
 
-func MakeFetcher(logger *zap.Logger, sharedVolumePath string, sharedSecretPath string, sharedConfigPath string) (*Fetcher, error) {
+func MakeFetcher(logger *zap.Logger, clientGen crd.ClientGeneratorInterface, sharedVolumePath string, sharedSecretPath string,
+	sharedConfigPath string, podInfoMountDir string) (*Fetcher, error) {
 	fLogger := logger.Named("fetcher")
 	err := makeVolumeDir(sharedVolumePath)
 	if err != nil {
@@ -90,7 +91,6 @@ func MakeFetcher(logger *zap.Logger, sharedVolumePath string, sharedSecretPath s
 		fLogger.Fatal("error creating shared config directory", zap.Error(err), zap.String("directory", sharedConfigPath))
 	}
 
-	clientGen := crd.NewClientGenerator()
 	fissionClient, err := clientGen.GetFissionClient()
 	if err != nil {
 		return nil, errors.Wrap(err, "error making the fission client")
@@ -100,12 +100,12 @@ func MakeFetcher(logger *zap.Logger, sharedVolumePath string, sharedSecretPath s
 		return nil, errors.Wrap(err, "error making the kube client")
 	}
 
-	name, err := os.ReadFile(fv1.PodInfoMount + "/name")
+	name, err := os.ReadFile(podInfoMountDir + "/name")
 	if err != nil {
 		return nil, errors.Wrap(err, "error reading pod name from downward volume")
 	}
 
-	namespace, err := os.ReadFile(fv1.PodInfoMount + "/namespace")
+	namespace, err := os.ReadFile(podInfoMountDir + "/namespace")
 	if err != nil {
 		return nil, errors.Wrap(err, "error reading pod namespace from downward volume")
 	}
@@ -349,19 +349,11 @@ func (fetcher *Fetcher) Fetch(ctx context.Context, pkg *fv1.Package, req Functio
 		}
 	}
 
-	//checking if file is a zip
+	// checking if file is a zip
 	if match, _ := utils.IsZip(tmpPath); match && !req.KeepArchive {
 		// unarchive tmp file to a tmp unarchive path
-		id, err := uuid.NewV4()
-		if err != nil {
-			logger.Error("error generating uuid",
-				zap.Error(err),
-				zap.String("archive_location", tmpPath))
-			return http.StatusInternalServerError, err
-		}
-
-		tmpUnarchivePath := filepath.Join(fetcher.sharedVolumePath, id.String())
-		err = fetcher.unarchive(tmpPath, tmpUnarchivePath)
+		tmpUnarchivePath := filepath.Join(fetcher.sharedVolumePath, uuid.NewString())
+		err := fetcher.unarchive(tmpPath, tmpUnarchivePath)
 		if err != nil {
 			logger.Error("error unarchive",
 				zap.Error(err),

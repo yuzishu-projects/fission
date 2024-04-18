@@ -27,6 +27,7 @@ import (
 	"github.com/fission/fission/pkg/crd"
 	"github.com/fission/fission/pkg/generated/clientset/versioned"
 	"github.com/fission/fission/pkg/utils"
+	"github.com/fission/fission/pkg/utils/manager"
 )
 
 type (
@@ -38,21 +39,22 @@ type (
 	}
 )
 
-func MakeTimerSync(ctx context.Context, logger *zap.Logger, fissionClient versioned.Interface, timer *Timer) *TimerSync {
+func MakeTimerSync(ctx context.Context, logger *zap.Logger, fissionClient versioned.Interface, timer *Timer) (*TimerSync, error) {
 	ws := &TimerSync{
 		logger:        logger.Named("timer_sync"),
 		fissionClient: fissionClient,
 		timer:         timer,
 	}
 	ws.timeTriggerInformer = utils.GetInformersForNamespaces(fissionClient, time.Minute*30, fv1.TimeTriggerResource)
-	ws.TimeTriggerEventHandlers(ctx)
-	return ws
+	err := ws.TimeTriggerEventHandlers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ws, nil
 }
 
-func (ws *TimerSync) Run(ctx context.Context) {
-	for _, informer := range ws.timeTriggerInformer {
-		go informer.Run(ctx.Done())
-	}
+func (ws *TimerSync) Run(ctx context.Context, mgr manager.Interface) {
+	mgr.AddInformers(ctx, ws.timeTriggerInformer)
 }
 
 func (ws *TimerSync) AddUpdateTimeTrigger(timeTrigger *fv1.TimeTrigger) {
@@ -60,7 +62,7 @@ func (ws *TimerSync) AddUpdateTimeTrigger(timeTrigger *fv1.TimeTrigger) {
 
 	ws.logger.Debug("cron event")
 
-	if item, ok := ws.timer.triggers[crd.CacheKeyUID(&timeTrigger.ObjectMeta)]; ok {
+	if item, ok := ws.timer.triggers[crd.CacheKeyUIDFromMeta(&timeTrigger.ObjectMeta)]; ok {
 		if item.cron != nil {
 			item.cron.Stop()
 		}
@@ -68,7 +70,7 @@ func (ws *TimerSync) AddUpdateTimeTrigger(timeTrigger *fv1.TimeTrigger) {
 		item.cron = ws.timer.newCron(*timeTrigger)
 		logger.Debug("cron updated")
 	} else {
-		ws.timer.triggers[crd.CacheKeyUID(&timeTrigger.ObjectMeta)] = &timerTriggerWithCron{
+		ws.timer.triggers[crd.CacheKeyUIDFromMeta(&timeTrigger.ObjectMeta)] = &timerTriggerWithCron{
 			trigger: *timeTrigger,
 			cron:    ws.timer.newCron(*timeTrigger),
 		}
@@ -79,19 +81,19 @@ func (ws *TimerSync) AddUpdateTimeTrigger(timeTrigger *fv1.TimeTrigger) {
 func (ws *TimerSync) DeleteTimeTrigger(timeTrigger *fv1.TimeTrigger) {
 	logger := ws.logger.With(zap.String("trigger_name", timeTrigger.Name), zap.String("trigger_namespace", timeTrigger.Namespace))
 
-	if item, ok := ws.timer.triggers[crd.CacheKeyUID(&timeTrigger.ObjectMeta)]; ok {
+	if item, ok := ws.timer.triggers[crd.CacheKeyUIDFromMeta(&timeTrigger.ObjectMeta)]; ok {
 		if item.cron != nil {
 			item.cron.Stop()
 			logger.Info("cron for time trigger stopped")
 		}
-		delete(ws.timer.triggers, crd.CacheKeyUID(&timeTrigger.ObjectMeta))
+		delete(ws.timer.triggers, crd.CacheKeyUIDFromMeta(&timeTrigger.ObjectMeta))
 		logger.Debug("cron deleted")
 	}
 }
 
-func (ws *TimerSync) TimeTriggerEventHandlers(ctx context.Context) {
+func (ws *TimerSync) TimeTriggerEventHandlers(ctx context.Context) error {
 	for _, informer := range ws.timeTriggerInformer {
-		informer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		_, err := informer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				timeTrigger := obj.(*fv1.TimeTrigger)
 				ws.AddUpdateTimeTrigger(timeTrigger)
@@ -108,5 +110,9 @@ func (ws *TimerSync) TimeTriggerEventHandlers(ctx context.Context) {
 				ws.DeleteTimeTrigger(timeTrigger)
 			},
 		})
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }

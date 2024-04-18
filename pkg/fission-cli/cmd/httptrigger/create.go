@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/pkg/errors"
-	uuid "github.com/satori/go.uuid"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -34,6 +33,7 @@ import (
 	"github.com/fission/fission/pkg/fission-cli/console"
 	flagkey "github.com/fission/fission/pkg/fission-cli/flag/key"
 	"github.com/fission/fission/pkg/fission-cli/util"
+	"github.com/fission/fission/pkg/utils/uuid"
 )
 
 type CreateSubCommand struct {
@@ -70,11 +70,7 @@ func (opts *CreateSubCommand) complete(input cli.Input) error {
 	// just name triggers by uuid.
 	if len(triggerName) == 0 {
 		console.Warn(fmt.Sprintf("--%v will be soon marked as required flag, see 'help' for details", flagkey.HtName))
-		id, err := uuid.NewV4()
-		if err != nil {
-			return err
-		}
-		triggerName = id.String()
+		triggerName = uuid.NewString()
 	}
 
 	userProvidedNS, fnNamespace, err := opts.GetResourceNamespace(input, flagkey.NamespaceFunction)
@@ -128,15 +124,6 @@ func (opts *CreateSubCommand) complete(input cli.Input) error {
 
 	// For Specs, the spec validate checks for function reference
 	if input.Bool(flagkey.SpecSave) {
-
-		htTrigger, err := opts.Client().FissionClientSet.CoreV1().HTTPTriggers(m.Namespace).Get(input.Context(), m.Name, metav1.GetOptions{})
-		if err != nil && !kerrors.IsNotFound(err) {
-			return err
-		}
-		if htTrigger.Name != "" && htTrigger.Namespace != "" {
-			return errors.New("duplicate trigger exists, choose a different name or leave it empty for fission to auto-generate it")
-		}
-
 		specDir := util.GetSpecDir(input)
 		specIgnore := util.GetSpecIgnore(input)
 		fr, err := spec.ReadSpecs(specDir, specIgnore, false)

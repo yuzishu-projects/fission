@@ -38,7 +38,6 @@ import (
 	"github.com/fission/fission/pkg/fission-cli/console"
 	"github.com/fission/fission/pkg/fission-cli/flag"
 	flagkey "github.com/fission/fission/pkg/fission-cli/flag/key"
-	_ "github.com/fission/fission/pkg/mqtrigger/messageQueue/kafka"
 )
 
 const (
@@ -49,7 +48,7 @@ const (
 `
 )
 
-func App() *cobra.Command {
+func App(clientOptions cmd.ClientOptions) *cobra.Command {
 	cobra.EnableCommandSorting = false
 
 	rootCmd := &cobra.Command{
@@ -59,9 +58,7 @@ func App() *cobra.Command {
 		PersistentPreRunE: wrapper.Wrapper(
 			func(input cli.Input) error {
 				console.Verbosity = input.Int(flagkey.Verbosity)
-				clientOptions := cmd.ClientOptions{
-					KubeContext: input.String(flagkey.KubeContext),
-				}
+				clientOptions.KubeContext = input.String(flagkey.KubeContext)
 				// TODO: use fake rest client for offline spec generation
 				// if input.IsSet(flagkey.ClientOnly) || input.IsSet(flagkey.PreCheckOnly) {
 				// }
@@ -83,7 +80,7 @@ func App() *cobra.Command {
 	})
 
 	wrapper.SetFlags(rootCmd, flag.FlagSet{
-		Global: []flag.Flag{flag.GlobalServer, flag.GlobalVerbosity, flag.KubeContext, flag.Namespace},
+		Global: []flag.Flag{flag.GlobalVerbosity, flag.KubeContext, flag.Namespace},
 	})
 
 	groups := helptemplate.CommandGroups{}

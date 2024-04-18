@@ -25,17 +25,19 @@ import (
 
 	config "github.com/fission/fission/pkg/featureconfig"
 	"github.com/fission/fission/pkg/generated/clientset/versioned"
+	"github.com/fission/fission/pkg/utils/manager"
 )
 
 // ConfigureFeatures gets the feature config and configures the features that are enabled
-func ConfigureFeatures(ctx context.Context, logger *zap.Logger, unitTestMode bool, fissionClient versioned.Interface, kubeClient kubernetes.Interface) error {
+func ConfigureFeatures(ctx context.Context, logger *zap.Logger, unitTestMode bool, fissionClient versioned.Interface,
+	kubeClient kubernetes.Interface, mgr manager.Interface) error {
 	// set feature enabled to false if unitTestMode
 	if unitTestMode {
 		return nil
 	}
 
 	// get the featureConfig from config map mounted onto the file system
-	featureConfig, err := config.GetFeatureConfig()
+	featureConfig, err := config.GetFeatureConfig(logger)
 	if err != nil {
 		logger.Error("error getting feature config", zap.Error(err))
 		return err
@@ -47,7 +49,7 @@ func ConfigureFeatures(ctx context.Context, logger *zap.Logger, unitTestMode boo
 	if err != nil {
 		return errors.Wrap(err, "failed to start canary config manager")
 	}
-	canaryCfgMgr.Run(ctx)
+	canaryCfgMgr.Run(ctx, mgr)
 
 	return err
 }

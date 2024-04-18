@@ -25,7 +25,7 @@ import (
 	"os"
 	"time"
 
-	uuid "github.com/satori/go.uuid"
+	"github.com/fission/fission/pkg/utils/uuid"
 )
 
 const (
@@ -49,10 +49,7 @@ type (
 )
 
 func NewTracker() (*Tracker, error) {
-	id, err := uuid.NewV4()
-	if err != nil {
-		return nil, fmt.Errorf("tracker.NewTracker: error generating UUID: %w", err)
-	}
+	id := uuid.NewString()
 
 	gaTrackingID := os.Getenv(GA_TRACKING_ID)
 	if gaTrackingID == "" {
@@ -66,7 +63,7 @@ func NewTracker() (*Tracker, error) {
 
 	tracker := &Tracker{
 		gaPropertyID: gaTrackingID,
-		cid:          id.String(),
+		cid:          id,
 		gaAPIURL:     gaAPIURL,
 	}
 	return tracker, nil
@@ -101,7 +98,7 @@ func (t *Tracker) SendEvent(ctx context.Context, e Event) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(req.Context(), HTTP_TIMEOUT)
+	ctx, cancel := context.WithTimeoutCause(req.Context(), HTTP_TIMEOUT, fmt.Errorf("tracker request timeout (%f)s exceeded", HTTP_TIMEOUT.Seconds()))
 	defer cancel()
 
 	req = req.WithContext(ctx)

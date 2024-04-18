@@ -37,8 +37,6 @@ create_archive
 uploadResp=$(fission ar upload --name "$tmp_dir"/test-deploy-pkg.zip)
 filename=$(echo "$uploadResp" | cut -d':' -f2 | tr -d ' ')
 
-kubectl exec -i "$podname" -n fission -- /bin/sh -c "ls $filename"
-
 # Test for list
 listResp=$(fission ar list)
 
@@ -54,7 +52,7 @@ ls | grep "$fileID"
 # Test for get-url
 getURLResp=$(fission ar get-url --id "$filename")
 
-echo "$getURLResp" | grep "http://storagesvc.fission/v1/archive?id=%2Ffission%2Ffission-functions%2F$fileID"
+echo "$getURLResp" | grep "/v1/archive?id=%2Ffission%2Ffission-functions%2F$fileID"
 
 # Test for delete
 fission ar delete --id "$filename"

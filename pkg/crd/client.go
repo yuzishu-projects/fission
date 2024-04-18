@@ -18,7 +18,7 @@ package crd
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -35,9 +35,25 @@ import (
 	"github.com/fission/fission/pkg/utils"
 )
 
-type ClientGenerator struct {
-	restConfig *rest.Config
-}
+const (
+	EnvKubeClientQps   = "KUBE_CLIENT_QPS"
+	EnvKubeClientBurst = "KUBE_CLIENT_BURST"
+)
+
+type (
+	ClientGeneratorInterface interface {
+		GetRestConfig() (*rest.Config, error)
+		GetFissionClient() (versioned.Interface, error)
+		GetKubernetesClient() (kubernetes.Interface, error)
+		GetApiExtensionsClient() (apiextensionsclient.Interface, error)
+		GetMetricsClient() (metricsclient.Interface, error)
+		GetDynamicClient() (dynamic.Interface, error)
+	}
+
+	ClientGenerator struct {
+		restConfig *rest.Config
+	}
+)
 
 func (cg *ClientGenerator) getRestConfig() (*rest.Config, error) {
 	if cg.restConfig != nil {
@@ -49,7 +65,25 @@ func (cg *ClientGenerator) getRestConfig() (*rest.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	qps, _ := utils.GetUIntValueFromEnv(EnvKubeClientQps)
+	burst, _ := utils.GetIntValueFromEnv(EnvKubeClientBurst)
+
+	// Set QPS and Burst to higher values to avoid throttling
+	if qps == 0 {
+		qps = 200
+	}
+	if burst == 0 {
+		burst = 500
+	}
+	cg.restConfig.QPS = float32(qps)
+	cg.restConfig.Burst = burst
+
 	return cg.restConfig, nil
+}
+
+func (cg *ClientGenerator) GetRestConfig() (*rest.Config, error) {
+	return cg.getRestConfig()
 }
 
 func (cg *ClientGenerator) GetFissionClient() (versioned.Interface, error) {
@@ -100,25 +134,24 @@ func NewClientGeneratorWithRestConfig(restConfig *rest.Config) *ClientGenerator 
 	return &ClientGenerator{restConfig: restConfig}
 }
 
-// WaitForCRDs does a timeout to check if CRDs have been installed
-func WaitForCRDs(ctx context.Context, logger *zap.Logger, fissionClient versioned.Interface) error {
-	logger.Info("Waiting for CRDs to be installed")
+// WaitForFunctionCRDs does a timeout to check if CRDs have been installed
+func WaitForFunctionCRDs(ctx context.Context, logger *zap.Logger, fissionClient versioned.Interface) error {
 	defaultNs := utils.DefaultNSResolver().DefaultNamespace
 	if defaultNs == "" {
 		defaultNs = metav1.NamespaceDefault
 	}
+	logger.Info("Checking function CRD access", zap.String("namespace", defaultNs), zap.String("timeout", "30s"))
 	start := time.Now()
 	for {
 		fi := fissionClient.CoreV1().Functions(defaultNs)
 		_, err := fi.List(ctx, metav1.ListOptions{})
-		if err != nil {
-			time.Sleep(100 * time.Millisecond)
-		} else {
+		if err == nil {
 			return nil
 		}
+		time.Sleep(100 * time.Millisecond)
 
 		if time.Since(start) > 30*time.Second {
-			return errors.New("timeout waiting for CRDs")
+			return fmt.Errorf("timeout waiting for function CRD access")
 		}
 	}
 }

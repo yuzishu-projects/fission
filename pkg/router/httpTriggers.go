@@ -32,12 +32,13 @@ import (
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
 	ferror "github.com/fission/fission/pkg/error"
-	executorClient "github.com/fission/fission/pkg/executor/client"
+	eclient "github.com/fission/fission/pkg/executor/client"
 	config "github.com/fission/fission/pkg/featureconfig"
 	"github.com/fission/fission/pkg/generated/clientset/versioned"
 	"github.com/fission/fission/pkg/info"
 	"github.com/fission/fission/pkg/throttler"
 	"github.com/fission/fission/pkg/utils"
+	"github.com/fission/fission/pkg/utils/manager"
 	"github.com/fission/fission/pkg/utils/metrics"
 )
 
@@ -49,7 +50,7 @@ type HTTPTriggerSet struct {
 	logger                     *zap.Logger
 	fissionClient              versioned.Interface
 	kubeClient                 kubernetes.Interface
-	executor                   *executorClient.Client
+	executor                   eclient.ClientInterface
 	resolver                   *functionReferenceResolver
 	triggers                   []fv1.HTTPTrigger
 	triggerInformer            map[string]k8sCache.SharedIndexInformer
@@ -64,7 +65,7 @@ type HTTPTriggerSet struct {
 }
 
 func makeHTTPTriggerSet(logger *zap.Logger, fmap *functionServiceMap, fissionClient versioned.Interface,
-	kubeClient kubernetes.Interface, executor *executorClient.Client, params *tsRoundTripperParams, isDebugEnv bool, unTapServiceTimeout time.Duration, actionThrottler *throttler.Throttler) *HTTPTriggerSet {
+	kubeClient kubernetes.Interface, executor eclient.ClientInterface, params *tsRoundTripperParams, isDebugEnv bool, unTapServiceTimeout time.Duration, actionThrottler *throttler.Throttler) (*HTTPTriggerSet, error) {
 
 	httpTriggerSet := &HTTPTriggerSet{
 		logger:                     logger.Named("http_trigger_set"),
@@ -82,26 +83,39 @@ func makeHTTPTriggerSet(logger *zap.Logger, fmap *functionServiceMap, fissionCli
 	}
 	httpTriggerSet.triggerInformer = utils.GetInformersForNamespaces(fissionClient, time.Minute*30, fv1.HttpTriggerResource)
 	httpTriggerSet.funcInformer = utils.GetInformersForNamespaces(fissionClient, time.Minute*30, fv1.FunctionResource)
-	httpTriggerSet.addTriggerHandlers()
-	httpTriggerSet.addFunctionHandlers()
-	return httpTriggerSet
+	err := httpTriggerSet.addTriggerHandlers()
+	if err != nil {
+		return nil, err
+	}
+	err = httpTriggerSet.addFunctionHandlers()
+	if err != nil {
+		return nil, err
+	}
+	return httpTriggerSet, nil
 }
 
-func (ts *HTTPTriggerSet) subscribeRouter(ctx context.Context, mr *mutableRouter) {
+func (ts *HTTPTriggerSet) subscribeRouter(ctx context.Context, mgr manager.Interface, mr *mutableRouter) error {
 	resolver := makeFunctionReferenceResolver(ts.logger, ts.funcInformer)
 	ts.resolver = resolver
 	ts.mutableRouter = mr
 
 	if ts.fissionClient == nil {
 		// Used in tests only.
-		mr.updateRouter(ts.getRouter(nil))
+		router, err := ts.getRouter(nil)
+		if err != nil {
+			return err
+		}
+		mr.updateRouter(router)
 		ts.logger.Info("skipping continuous trigger updates")
-		return
+		return nil
 	}
-	go ts.updateRouter()
-	go ts.syncTriggers()
-	go ts.runInformer(ctx, ts.funcInformer)
-	go ts.runInformer(ctx, ts.triggerInformer)
+	mgr.Add(ctx, func(ctx context.Context) {
+		ts.updateRouter(ctx)
+	})
+	ts.syncTriggers()
+	mgr.AddInformers(ctx, ts.funcInformer)
+	mgr.AddInformers(ctx, ts.triggerInformer)
+	return nil
 }
 
 func defaultHomeHandler(w http.ResponseWriter, r *http.Request) {
@@ -127,9 +141,12 @@ func versionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (ts *HTTPTriggerSet) getRouter(fnTimeoutMap map[types.UID]int) *mux.Router {
+func (ts *HTTPTriggerSet) getRouter(fnTimeoutMap map[types.UID]int) (*mux.Router, error) {
 
-	featureConfig, _ := config.GetFeatureConfig()
+	featureConfig, err := config.GetFeatureConfig(ts.logger)
+	if err != nil {
+		return nil, err
+	}
 
 	muxRouter := mux.NewRouter()
 	muxRouter.Use(metrics.HTTPMetricMiddleware)
@@ -283,16 +300,16 @@ func (ts *HTTPTriggerSet) getRouter(fnTimeoutMap map[types.UID]int) *mux.Router 
 	// version of application.
 	muxRouter.HandleFunc("/_version", versionHandler).Methods("GET")
 
-	return muxRouter
+	return muxRouter, nil
 }
 
 func (ts *HTTPTriggerSet) updateTriggerStatusFailed(ht *fv1.HTTPTrigger, err error) {
 	// TODO
 }
 
-func (ts *HTTPTriggerSet) addTriggerHandlers() {
+func (ts *HTTPTriggerSet) addTriggerHandlers() error {
 	for _, triggerInformer := range ts.triggerInformer {
-		triggerInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		_, err := triggerInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				trigger := obj.(*fv1.HTTPTrigger)
 				go createIngress(context.Background(), ts.logger, trigger, ts.kubeClient)
@@ -315,13 +332,17 @@ func (ts *HTTPTriggerSet) addTriggerHandlers() {
 				ts.syncTriggers()
 			},
 		})
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func (ts *HTTPTriggerSet) addFunctionHandlers() {
+func (ts *HTTPTriggerSet) addFunctionHandlers() error {
 	for _, funcInformer := range ts.funcInformer {
 
-		funcInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		_, err := funcInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
 				ts.syncTriggers()
 			},
@@ -353,13 +374,11 @@ func (ts *HTTPTriggerSet) addFunctionHandlers() {
 				ts.syncTriggers()
 			},
 		})
+		if err != nil {
+			return err
+		}
 	}
-}
-
-func (ts *HTTPTriggerSet) runInformer(ctx context.Context, informer map[string]k8sCache.SharedIndexInformer) {
-	for _, inf := range informer {
-		go inf.Run(ctx.Done())
-	}
+	return nil
 }
 
 func (ts *HTTPTriggerSet) syncTriggers() {
@@ -368,8 +387,13 @@ func (ts *HTTPTriggerSet) syncTriggers() {
 	})
 }
 
-func (ts *HTTPTriggerSet) updateRouter() {
-	for range ts.updateRouterRequestChannel {
+func (ts *HTTPTriggerSet) updateRouter(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ts.updateRouterRequestChannel:
+		}
 		// get triggers
 		alltriggers := make([]fv1.HTTPTrigger, 0)
 		for _, triggerInformer := range ts.triggerInformer {
@@ -394,6 +418,11 @@ func (ts *HTTPTriggerSet) updateRouter() {
 		ts.functions = allfunctions
 
 		// make a new router and use it
-		ts.mutableRouter.updateRouter(ts.getRouter(functionTimeout))
+		router, err := ts.getRouter(functionTimeout)
+		if err != nil {
+			ts.logger.Error("error updating router", zap.Error(err))
+			continue
+		}
+		ts.mutableRouter.updateRouter(router)
 	}
 }

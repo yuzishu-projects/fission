@@ -14,17 +14,11 @@ metadata:
 {{- if eq "buildermgr" .component }}
 {{- include "buildermgr-rules" . }}
 {{- end }}
-{{- if eq "controller" .component }}
-{{- include "controller-rules" . }}
-{{- end }}
 {{- if eq "executor" .component }}
 {{- include "executor-rules" . }}
 {{- end }}
 {{- if eq "kubewatcher" .component }}
 {{- include "kubewatcher-rules" . }}
-{{- end }}
-{{- if eq "kafka" .component }}
-{{- include "kafka-rules" . }}
 {{- end }}
 {{- if eq "keda" .component }}
 {{- include "keda-rules" . }}

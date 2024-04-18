@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -25,7 +26,7 @@ type (
 	Input interface {
 		Context() context.Context
 
-		//Parse(input interface{}) error
+		// Parse(input interface{}) error
 
 		// IsSet checks whether a flag has been set by the user
 		IsSet(key string) bool
@@ -76,5 +77,11 @@ type (
 
 		// Duration returns time duration of given flag.
 		Duration(key string) time.Duration
+
+		// Stdout returns io.Writer for stdout.
+		Stdout() io.Writer
+
+		// Stderr returns io.Writer for stderr.
+		Stderr() io.Writer
 	}
 )

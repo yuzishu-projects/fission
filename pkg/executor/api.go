@@ -19,6 +19,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -26,16 +27,14 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
-	"github.com/hashicorp/go-multierror"
-	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
 	fv1 "github.com/fission/fission/pkg/apis/core/v1"
-	"github.com/fission/fission/pkg/crd"
 	ferror "github.com/fission/fission/pkg/error"
 	"github.com/fission/fission/pkg/executor/client"
 	"github.com/fission/fission/pkg/executor/fscache"
 	"github.com/fission/fission/pkg/utils/httpserver"
+	"github.com/fission/fission/pkg/utils/manager"
 	"github.com/fission/fission/pkg/utils/metrics"
 	otelUtils "github.com/fission/fission/pkg/utils/otel"
 )
@@ -157,9 +156,9 @@ func (executor *Executor) getServiceForFunction(ctx context.Context, fn *fv1.Fun
 			return
 		}
 		if funcSvc != nil {
-			et.UnTapService(ctx, crd.CacheKey(funcSvc.Function), resp.funcSvc.Address)
+			et.UnTapService(ctx, funcSvc.Function, resp.funcSvc.Address)
 		} else {
-			et.MarkSpecializationFailure(ctx, crd.CacheKey(&fn.ObjectMeta))
+			et.MarkSpecializationFailure(ctx, &fn.ObjectMeta)
 		}
 	}
 	if errors.Is(ctx.Err(), context.Canceled) {
@@ -202,27 +201,26 @@ func (executor *Executor) tapServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	errs := &multierror.Error{}
+	var errs error
 	for _, req := range tapSvcReqs {
 		svcHost := strings.TrimPrefix(req.ServiceURL, "http://")
 
 		et, exists := executor.executorTypes[req.FnExecutorType]
 		if !exists {
-			errs = multierror.Append(errs,
-				errors.Errorf("error tapping service due to unknown executor type '%v' found",
+			errs = errors.Join(errs,
+				fmt.Errorf("error tapping service due to unknown executor type '%s' found",
 					req.FnExecutorType))
 			continue
 		}
 
 		err = et.TapService(ctx, svcHost)
 		if err != nil {
-			errs = multierror.Append(errs,
-				errors.Wrapf(err, "'%v' failed to tap function '%v' in '%v' with service url '%v'",
-					req.FnMetadata.Name, req.FnMetadata.Namespace, req.ServiceURL, req.FnExecutorType))
+			errs = errors.Join(errs,
+				fmt.Errorf("error tapping function '%s/%s' with executor '%s' and service url '%s': %w", req.FnMetadata.Namespace, req.FnMetadata.Name, req.FnExecutorType, req.ServiceURL, err))
 		}
 	}
 
-	if errs.ErrorOrNil() != nil {
+	if errs != nil {
 		logger.Error("error tapping function service", zap.Error(errs))
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
@@ -248,17 +246,16 @@ func (executor *Executor) unTapService(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to parse request", http.StatusBadRequest)
 		return
 	}
-	key := fmt.Sprintf("%v_%v", tapSvcReq.FnMetadata.UID, tapSvcReq.FnMetadata.ResourceVersion)
 	t := tapSvcReq.FnExecutorType
 	if t != fv1.ExecutorTypePoolmgr {
-		msg := fmt.Sprintf("Unknown executor type '%v'", t)
+		msg := fmt.Sprintf("Unknown executor type '%s'", t)
 		http.Error(w, html.EscapeString(msg), http.StatusBadRequest)
 		return
 	}
 
 	et := executor.executorTypes[t]
 
-	et.UnTapService(ctx, key, tapSvcReq.ServiceURL)
+	et.UnTapService(ctx, &tapSvcReq.FnMetadata, tapSvcReq.ServiceURL)
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -290,8 +287,7 @@ func (executor *Executor) GetHandler() http.Handler {
 }
 
 // Serve starts an HTTP server.
-func (executor *Executor) Serve(ctx context.Context, port int) {
+func (executor *Executor) Serve(ctx context.Context, mgr manager.Interface, port int) {
 	handler := otelUtils.GetHandlerWithOTEL(executor.GetHandler(), "fission-executor", otelUtils.UrlsToIgnore("/healthz"))
-	httpserver.StartServer(ctx, executor.logger, "executor", fmt.Sprintf("%d", port), handler)
-
+	httpserver.StartServer(ctx, executor.logger, mgr, "executor", fmt.Sprintf("%d", port), handler)
 }

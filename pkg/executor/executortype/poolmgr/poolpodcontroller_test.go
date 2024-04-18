@@ -34,9 +34,12 @@ import (
 	genInformer "github.com/fission/fission/pkg/generated/informers/externalversions"
 	"github.com/fission/fission/pkg/utils"
 	"github.com/fission/fission/pkg/utils/loggerfactory"
+	"github.com/fission/fission/pkg/utils/manager"
 )
 
 func TestPoolPodControllerPodCleanup(t *testing.T) {
+	mgr := manager.New()
+	defer mgr.Wait()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logger := loggerfactory.GetLogger()
@@ -51,8 +54,11 @@ func TestPoolPodControllerPodCleanup(t *testing.T) {
 	}
 	gpmInformerFactory := utils.GetInformerFactoryByExecutor(kubernetesClient, executorLabel, time.Minute*30)
 
-	ppc := NewPoolPodController(ctx, logger, kubernetesClient, false,
+	ppc, err := NewPoolPodController(ctx, logger, kubernetesClient, false,
 		factory, gpmInformerFactory)
+	if err != nil {
+		t.Fatalf("Error creating pool pod controller: %v", err)
+	}
 
 	executorInstanceID := strings.ToLower(uniuri.NewLen(8))
 	metricsClient := metricsclient.NewSimpleClientset()
@@ -71,7 +77,7 @@ func TestPoolPodControllerPodCleanup(t *testing.T) {
 	gpm := executor.(*GenericPoolManager)
 	ppc.InjectGpm(gpm)
 
-	go ppc.Run(ctx, ctx.Done())
+	go ppc.Run(ctx, ctx.Done(), mgr)
 
 	for _, f := range factory {
 		f.Start(ctx.Done())
